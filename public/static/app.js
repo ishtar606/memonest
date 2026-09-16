@@ -3,6 +3,16 @@
 
 const MemoNest = {
   // ── State ──────────────────────────────────────────────────────────────────
+  // ── 앱 버전/개발 로그 ─────────────────────────────────────────────────────
+  VERSION: '1.4.0',
+  CHANGELOG: [
+    { ver: '1.4.0', date: '2026-09-16', changes: ['보안: Genspark Identity 인증 적용 (Sign in with Genspark)', 'STT 설정창 추가 (마이크 환경별 가이드)', '사용자 정보 헤더 표시', '기능 전체 자체 검토 및 버그 수정', '개발 로그 정보창 추가'] },
+    { ver: '1.3.0', date: '2026-09-16', changes: ['일정: GMT 기준시간 표시 + 단말 타임존 동기화', 'ToDo: 태그 인라인 표시 + 태그별 그룹 필터 기능'] },
+    { ver: '1.2.0', date: '2026-09-16', changes: ['PC 반응형 레이아웃 (사이드바+헤더)', 'ToDo 태그 저장 + 뱃지 표시', '창 크기 자동 레이아웃 전환'] },
+    { ver: '1.1.0', date: '2026-09-09', changes: ['TypeScript 문법 제거 (blank page 버그 수정)', '삼항연산자 문법 오류 수정', 'PC/모바일 듀얼 레이아웃 초기 구현'] },
+    { ver: '1.0.0', date: '2026-09-09', changes: ['MemoNest 최초 구현 (7개 모듈: ToDo, 일정, 회의록, 장보기, 아이디어, 소설, 일기)', 'Notion API 자동 DB 생성', 'Gemini AI 구조화', 'Groq Whisper STT'] },
+  ],
+
   state: {
     currentModule: 'home',
     dbIds: {},
@@ -13,6 +23,12 @@ const MemoNest = {
     audioChunks: [],
     recordingTimer: null,
     recordingSeconds: 0,
+    currentUser: null,
+    sttSettings: {
+      enabled: true,
+      language: 'ko',
+      autoStop: 10,  // 초
+    },
   },
 
   // ── Storage Helpers ────────────────────────────────────────────────────────
@@ -26,7 +42,25 @@ const MemoNest = {
   async init() {
     this.state.dbIds = this.load('dbIds', {});
     this.state.isSetupDone = Object.keys(this.state.dbIds).length === 7;
+    this.state.sttSettings = this.load('sttSettings', this.state.sttSettings);
+    // Genspark 사용자 정보 로드 (배포 환경)
+    await this.loadCurrentUser();
     this.render();
+  },
+
+  async loadCurrentUser() {
+    try {
+      const res = await fetch('/__genspark_auth/me', { credentials: 'include' });
+      if (res.ok) {
+        const data = await res.json();
+        if (data && data.authenticated) {
+          this.state.currentUser = { id: data.id, email: data.email, name: data.name, avatar: data.avatar };
+          return;
+        }
+      }
+    } catch (_) {}
+    // 로컬 개발 환경 fallback
+    this.state.currentUser = null;
   },
 
   // ── Toast ──────────────────────────────────────────────────────────────────
@@ -157,8 +191,19 @@ const MemoNest = {
             </button>`).join('')}
         </div>`).join('')}
       <div style="margin-top:auto;padding:16px;border-top:1px solid var(--border)">
-        <button class="pc-nav-item" onclick="MemoNest.showMoreMenu()" style="color:#94a3b8">
+        ${this.state.currentUser ? `
+        <div style="display:flex;align-items:center;gap:8px;padding:10px 12px;background:rgba(99,102,241,0.08);border-radius:10px;margin-bottom:8px">
+          ${this.state.currentUser.avatar ? `<img src="${this.state.currentUser.avatar}" style="width:28px;height:28px;border-radius:50%;object-fit:cover" alt="">` : `<div style="width:28px;height:28px;border-radius:50%;background:linear-gradient(135deg,#6366f1,#8b5cf6);display:flex;align-items:center;justify-content:center;color:white;font-size:12px;font-weight:700">${(this.state.currentUser.name||this.state.currentUser.email||'?')[0].toUpperCase()}</div>`}
+          <div style="min-width:0">
+            <div style="font-size:12px;font-weight:600;color:#1e293b;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${this.state.currentUser.name || ''}</div>
+            <div style="font-size:10px;color:#94a3b8;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${this.state.currentUser.email || ''}</div>
+          </div>
+        </div>` : ''}
+        <button class="pc-nav-item" onclick="MemoNest.showSettings()" style="color:#94a3b8">
           <span class="nav-icon">⚙️</span><span>설정</span>
+        </button>
+        <button class="pc-nav-item" onclick="MemoNest.showChangelog()" style="color:#94a3b8">
+          <span class="nav-icon">📋</span><span>개발 로그 v${this.VERSION}</span>
         </button>
         <a href="https://notion.so" target="_blank" class="pc-nav-item" style="text-decoration:none;display:flex;color:#94a3b8">
           <span class="nav-icon">🔗</span><span>노션에서 보기</span>
@@ -191,6 +236,14 @@ const MemoNest = {
         <button class="pc-header-btn" onclick="MemoNest.showAddForCurrentModule()">
           <i class="fas fa-plus"></i> 새로 추가
         </button>
+        <button class="pc-header-btn" onclick="MemoNest.showSettings()" title="설정">
+          <i class="fas fa-cog"></i>
+        </button>
+        ${this.state.currentUser ? `
+        <div style="display:flex;align-items:center;gap:6px;padding:6px 12px;border-radius:8px;background:rgba(99,102,241,0.08);font-size:12px;color:#475569">
+          ${this.state.currentUser.avatar ? `<img src="${this.state.currentUser.avatar}" style="width:22px;height:22px;border-radius:50%;object-fit:cover" alt="">` : `<div style="width:22px;height:22px;border-radius:50%;background:linear-gradient(135deg,#6366f1,#8b5cf6);display:flex;align-items:center;justify-content:center;color:white;font-size:10px;font-weight:700">${(this.state.currentUser.name||this.state.currentUser.email||'?')[0].toUpperCase()}</div>`}
+          <span>${this.state.currentUser.name || this.state.currentUser.email || ''}</span>
+        </div>` : ''}
         <a href="https://notion.so" target="_blank" class="pc-header-btn" style="text-decoration:none">
           <i class="fas fa-external-link-alt"></i> 노션 열기
         </a>
@@ -323,8 +376,16 @@ const MemoNest = {
         <div class="subtitle">${info.sub}</div>
       </div>
       <div class="header-actions">
+        ${this.state.currentUser ? `
+        <div style="display:flex;align-items:center;gap:5px;font-size:12px;color:#475569;padding:4px 8px;background:rgba(99,102,241,0.08);border-radius:8px;cursor:pointer" onclick="MemoNest.showSettings()">
+          ${this.state.currentUser.avatar ? `<img src="${this.state.currentUser.avatar}" style="width:20px;height:20px;border-radius:50%;object-fit:cover" alt="">` : `<div style="width:20px;height:20px;border-radius:50%;background:linear-gradient(135deg,#6366f1,#8b5cf6);display:flex;align-items:center;justify-content:center;color:white;font-size:9px;font-weight:700">${(this.state.currentUser.name||this.state.currentUser.email||'?')[0].toUpperCase()}</div>`}
+          <span style="max-width:60px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${(this.state.currentUser.name||'').split(' ')[0] || ''}</span>
+        </div>` : ''}
         <button class="header-btn" onclick="MemoNest.openNotionLink()" title="노션에서 보기">
           <i class="fas fa-external-link-alt"></i>
+        </button>
+        <button class="header-btn" onclick="MemoNest.showSettings()" title="설정">
+          <i class="fas fa-cog"></i>
         </button>
       </div>
     </header>`;
@@ -394,10 +455,18 @@ const MemoNest = {
             <span style="font-size:28px;display:block;margin-bottom:6px">${m.icon}</span>${m.name}
           </button>`).join('')}
       </div>
-      <div style="margin-top:16px">
+      <div style="margin-top:16px;display:grid;grid-template-columns:1fr 1fr;gap:8px">
+        <button onclick="MemoNest.showSettings();document.getElementById('app-modal').remove()"
+          style="padding:12px;border-radius:10px;border:1px solid #e2e8f0;background:white;cursor:pointer;color:#475569;font-size:13px">
+          ⚙️ 설정
+        </button>
+        <button onclick="MemoNest.showChangelog();document.getElementById('app-modal').remove()"
+          style="padding:12px;border-radius:10px;border:1px solid #e2e8f0;background:white;cursor:pointer;color:#475569;font-size:13px">
+          📋 개발 로그
+        </button>
         <button onclick="MemoNest.resetSetup();document.getElementById('app-modal').remove()"
-          style="width:100%;padding:12px;border-radius:10px;border:1px solid #e2e8f0;background:white;cursor:pointer;color:#64748b;font-size:13px">
-          ⚙️ 설정 초기화
+          style="padding:12px;border-radius:10px;border:1px solid #fee2e2;background:#fff5f5;cursor:pointer;color:#ef4444;font-size:13px;grid-column:1/-1">
+          🗑️ 설정 초기화
         </button>
       </div>`);
   },
@@ -512,10 +581,12 @@ const MemoNest = {
             모든 데이터는 노션에 카테고리별로 자동 저장되어 언제든 조회 가능
           </div>
         </div>
-      </div>`;
+      </div>
+      ${this.renderVersionBanner()}`;
     }
 
     // Mobile
+    const latestChange = this.CHANGELOG[0];
     return `
     <div style="background:linear-gradient(135deg,#6366f1,#8b5cf6);color:white;padding:20px;border-radius:16px;margin-bottom:16px">
       <h2 style="font-size:20px;font-weight:700;margin-bottom:4px">${greeting}</h2>
@@ -523,11 +594,43 @@ const MemoNest = {
     </div>
     <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-bottom:16px">
       ${modules.map(m => `
-        <div class="module-card" onclick="${m.id === 'settings' ? 'MemoNest.showMoreMenu()' : `MemoNest.navigate('${m.id}')`}">
+        <div class="module-card" onclick="${m.id === 'settings' ? 'MemoNest.showSettings()' : `MemoNest.navigate('${m.id}')`}">
           <span class="icon">${m.icon}</span>
           <div class="name">${m.name}</div>
           <div class="count">${m.desc}</div>
         </div>`).join('')}
+    </div>
+    <div style="padding:12px 14px;background:#f8fafc;border-radius:12px;border:1px solid #e2e8f0;display:flex;align-items:center;justify-content:space-between;gap:8px">
+      <div style="font-size:11px;color:#94a3b8">
+        <strong style="color:#6366f1">v${this.VERSION}</strong> · ${latestChange.date} · ${latestChange.changes[0]}
+      </div>
+      <button onclick="MemoNest.showChangelog()" style="font-size:11px;color:#6366f1;background:none;border:none;cursor:pointer;padding:0;white-space:nowrap">로그 전체 ▶</button>
+    </div>`;
+  },
+
+  renderVersionBanner() {
+    const latest = this.CHANGELOG[0];
+    const secureIcon = this.state.currentUser ? '🔒' : '🌐';
+    const secureText = this.state.currentUser ? `Genspark 인증 활성 · ${this.state.currentUser.email || ''}` : '로컬 개발 환경';
+    return `
+    <div style="margin-top:10px;padding:14px 16px;background:#f8fafc;border-radius:12px;border:1px solid #e2e8f0">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+        <div style="font-size:12px;font-weight:700;color:#1e293b">📋 개발 로그 <span style="font-weight:400;color:#6366f1">v${this.VERSION}</span></div>
+        <button onclick="MemoNest.showChangelog()" style="font-size:12px;color:#6366f1;background:rgba(99,102,241,0.1);border:none;cursor:pointer;padding:4px 12px;border-radius:20px">전체 보기</button>
+      </div>
+      <div style="display:grid;gap:4px">
+        ${this.CHANGELOG.slice(0,3).map(entry => `
+          <div style="display:flex;gap:8px;font-size:12px;color:#475569;align-items:flex-start">
+            <span style="color:var(--primary);font-weight:600;white-space:nowrap">v${entry.ver}</span>
+            <span style="color:#94a3b8;white-space:nowrap">${entry.date}</span>
+            <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${entry.changes[0]}</span>
+          </div>`).join('')}
+      </div>
+      <div style="margin-top:10px;padding-top:10px;border-top:1px solid #e2e8f0;display:flex;align-items:center;gap:6px;font-size:11px;color:#94a3b8">
+        <span>${secureIcon}</span>
+        <span>${secureText}</span>
+        <span style="margin-left:auto">Hono · Cloudflare Pages · Notion API</span>
+      </div>
     </div>`;
   },
 
@@ -1583,41 +1686,73 @@ const MemoNest = {
   // VOICE INPUT (공통)
   // ══════════════════════════════════════════════════════════════════════════
   async startVoiceInput(targetId) {
+    // STT 비활성화 확인
+    if (!this.state.sttSettings.enabled) {
+      this.toast('STT가 비활성화되어 있어요. 설정에서 켜주세요.', 'info'); return;
+    }
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mr = new MediaRecorder(stream, { mimeType: 'audio/webm;codecs=opus' });
+      // Firefox는 audio/webm;codecs=opus 미지원이므로 fallback 처리
+      let mimeType = 'audio/webm;codecs=opus';
+      if (!MediaRecorder.isTypeSupported(mimeType)) {
+        mimeType = MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm'
+          : MediaRecorder.isTypeSupported('audio/ogg;codecs=opus') ? 'audio/ogg;codecs=opus'
+          : '';
+      }
+      const mrOptions = mimeType ? { mimeType } : {};
+      const mr = new MediaRecorder(stream, mrOptions);
       const chunks = [];
-      mr.ondataavailable = e => chunks.push(e.data);
+      mr.ondataavailable = e => e.data.size > 0 && chunks.push(e.data);
 
       const btn = document.querySelector(`[onclick*="startVoiceInput('${targetId}')"]`);
-      if (btn) { btn.innerHTML = '<i class="fas fa-stop"></i> 중지'; btn.style.background = '#ef4444'; btn.style.color = 'white'; }
+      if (btn) {
+        btn.innerHTML = `<i class="fas fa-stop"></i> 중지`;
+        btn.style.background = '#ef4444';
+        btn.style.color = 'white';
+        btn.setAttribute('title', `최대 ${this.state.sttSettings.autoStop}초`);
+      }
 
       mr.start(100);
 
+      // 자동 중지 타이머
+      const autoStopMs = (this.state.sttSettings.autoStop || 10) * 1000;
+      let autoTimer = setTimeout(() => stopRec(), autoStopMs);
+
       const stopRec = async () => {
-        mr.stop();
+        clearTimeout(autoTimer);
+        if (mr.state !== 'inactive') mr.stop();
         stream.getTracks().forEach(t => t.stop());
-        if (btn) { btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 변환 중...'; }
-        await new Promise(r => setTimeout(r, 500));
-        const blob = new Blob(chunks, { type: 'audio/webm' });
+        if (btn) { btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 변환 중...'; btn.disabled = true; }
+        await new Promise(r => setTimeout(r, 400));
+        const actualMime = mimeType || 'audio/webm';
+        const blob = new Blob(chunks, { type: actualMime });
+        if (blob.size < 1000) {
+          if (btn) { btn.innerHTML = '<i class="fas fa-microphone"></i> 음성 입력'; btn.style.background = ''; btn.style.color = ''; btn.disabled = false; }
+          this.toast('녹음이 너무 짧아요. 다시 시도해주세요.', 'info'); return;
+        }
         const reader = new FileReader();
         reader.onloadend = async () => {
           const base64 = reader.result.split(',')[1];
           try {
             const res = await fetch('/api/stt', {
               method: 'POST', headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ audioBase64: base64, mimeType: 'audio/webm' })
+              body: JSON.stringify({ audioBase64: base64, mimeType: actualMime, language: this.state.sttSettings.language })
             });
             const data = await res.json();
             const target = document.getElementById(targetId);
             if (target && data.text) {
               target.value = (target.value ? target.value + '\n' : '') + data.text;
+              // textarea 자동 높이 조정
+              target.style.height = 'auto';
+              target.style.height = target.scrollHeight + 'px';
+            } else if (!data.text) {
+              this.toast('인식된 음성이 없어요. 다시 말해주세요.', 'info');
             }
-            if (btn) { btn.innerHTML = '<i class="fas fa-microphone"></i> 음성 입력'; btn.style.background = ''; btn.style.color = ''; }
-            this.toast('🎙️ 음성 변환 완료!', 'success');
+            if (btn) { btn.innerHTML = '<i class="fas fa-microphone"></i> 음성 입력'; btn.style.background = ''; btn.style.color = ''; btn.disabled = false; btn.setAttribute('title',''); }
+            if (data.text) this.toast('🎙️ 음성 변환 완료!', 'success');
           } catch (e) {
-            if (btn) { btn.innerHTML = '<i class="fas fa-microphone"></i> 음성 입력'; btn.style.background = ''; btn.style.color = ''; }
-            this.toast('STT 변환 실패', 'error');
+            if (btn) { btn.innerHTML = '<i class="fas fa-microphone"></i> 음성 입력'; btn.style.background = ''; btn.style.color = ''; btn.disabled = false; }
+            this.toast('STT 변환 실패: ' + (e.message || '서버 오류'), 'error');
           }
         };
         reader.readAsDataURL(blob);
@@ -1626,9 +1761,163 @@ const MemoNest = {
       if (btn) {
         btn.onclick = stopRec;
       } else {
-        setTimeout(stopRec, 5000);
+        // 버튼이 없으면 자동 중지만
       }
-    } catch (e) { this.toast('마이크 권한이 필요합니다', 'error'); }
+    } catch (e) {
+      if (e.name === 'NotAllowedError') this.toast('마이크 권한을 허용해주세요', 'error');
+      else if (e.name === 'NotFoundError') this.toast('마이크 장치를 찾을 수 없어요', 'error');
+      else this.toast('마이크 오류: ' + e.message, 'error');
+    }
+  },
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // SETTINGS (설정창)
+  // ══════════════════════════════════════════════════════════════════════════
+  showSettings() {
+    const s = this.state.sttSettings;
+    const userBlock = this.state.currentUser ? `
+      <div style="background:rgba(99,102,241,0.06);border:1px solid rgba(99,102,241,0.15);border-radius:12px;padding:14px;margin-bottom:16px">
+        <div style="font-size:12px;font-weight:700;color:var(--primary);margin-bottom:10px">👤 로그인 정보</div>
+        <div style="display:flex;align-items:center;gap:10px">
+          ${this.state.currentUser.avatar ? `<img src="${this.state.currentUser.avatar}" style="width:36px;height:36px;border-radius:50%;object-fit:cover" alt="">` : `<div style="width:36px;height:36px;border-radius:50%;background:linear-gradient(135deg,#6366f1,#8b5cf6);display:flex;align-items:center;justify-content:center;color:white;font-size:15px;font-weight:700">${(this.state.currentUser.name||this.state.currentUser.email||'?')[0].toUpperCase()}</div>`}
+          <div>
+            <div style="font-size:14px;font-weight:600">${this.state.currentUser.name || '이름 없음'}</div>
+            <div style="font-size:12px;color:#64748b">${this.state.currentUser.email || ''}</div>
+          </div>
+          <span style="margin-left:auto;background:#dcfce7;color:#16a34a;font-size:11px;padding:3px 10px;border-radius:20px;font-weight:600">🔒 Genspark 인증됨</span>
+        </div>
+      </div>` : `
+      <div style="background:#fef9c3;border:1px solid #fde047;border-radius:12px;padding:12px;margin-bottom:16px;font-size:13px;color:#92400e">
+        ⚠️ 로컬 개발 환경 — 배포 후 Genspark 인증이 활성화됩니다
+      </div>`;
+
+    this.showModal('⚙️ 설정', `
+      ${userBlock}
+
+      <div style="font-size:12px;font-weight:700;color:var(--text-muted);text-transform:uppercase;margin-bottom:10px">🎙️ STT (음성→텍스트) 설정</div>
+      
+      <div style="background:#f8fafc;border-radius:12px;padding:14px;margin-bottom:14px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+          <div>
+            <div style="font-size:13px;font-weight:600">STT 기능 사용</div>
+            <div style="font-size:11px;color:#64748b">Groq Whisper API 기반</div>
+          </div>
+          <label style="position:relative;display:inline-block;width:44px;height:24px;cursor:pointer">
+            <input type="checkbox" id="stt-enabled" ${s.enabled ? 'checked' : ''} style="opacity:0;width:0;height:0">
+            <span id="stt-toggle" onclick="MemoNest.toggleSTTSetting()" style="position:absolute;top:0;left:0;right:0;bottom:0;background:${s.enabled ? '#6366f1' : '#e2e8f0'};border-radius:24px;transition:0.3s">
+              <span style="position:absolute;width:18px;height:18px;background:white;border-radius:50%;top:3px;left:${s.enabled ? '23px' : '3px'};transition:0.3s;box-shadow:0 1px 3px rgba(0,0,0,0.2)"></span>
+            </span>
+          </label>
+        </div>
+        <div class="form-group" style="margin-bottom:8px">
+          <label class="form-label">인식 언어</label>
+          <select class="form-select" id="stt-lang">
+            <option value="ko" ${s.language==='ko'?'selected':''}>한국어</option>
+            <option value="en" ${s.language==='en'?'selected':''}>English</option>
+            <option value="ja" ${s.language==='ja'?'selected':''}>日本語</option>
+            <option value="zh" ${s.language==='zh'?'selected':''}>中文</option>
+          </select>
+        </div>
+        <div class="form-group" style="margin-bottom:0">
+          <label class="form-label">자동 중지 (초) <span style="color:#94a3b8">${s.autoStop}초</span></label>
+          <input type="range" id="stt-autostop" min="5" max="60" value="${s.autoStop}" 
+            oninput="document.querySelector('[for=stt-autostop] span, label .form-label span')?.remove(); this.previousElementSibling.querySelector('span').textContent=this.value+'초'"
+            style="width:100%;accent-color:#6366f1">
+        </div>
+      </div>
+
+      <div style="font-size:12px;font-weight:700;color:var(--text-muted);text-transform:uppercase;margin-bottom:10px">🎤 마이크 환경별 안내</div>
+      <div style="background:#f8fafc;border-radius:12px;padding:14px;margin-bottom:14px">
+        <div style="display:grid;gap:10px">
+          <div style="padding:10px;background:white;border-radius:8px;border:1px solid #e2e8f0">
+            <div style="font-size:12px;font-weight:700;color:#1e293b;margin-bottom:4px">💻 PC (Chrome/Edge)</div>
+            <div style="font-size:12px;color:#475569">브라우저 주소창 옆 마이크 아이콘 → 허용<br>내장/외장 마이크 모두 자동 감지</div>
+          </div>
+          <div style="padding:10px;background:white;border-radius:8px;border:1px solid #e2e8f0">
+            <div style="font-size:12px;font-weight:700;color:#1e293b;margin-bottom:4px">📱 모바일 (iOS Safari/Android Chrome)</div>
+            <div style="font-size:12px;color:#475569">사이트 접근 시 마이크 권한 팝업 → 허용<br>iOS: HTTPS 필수 / Android: Chrome 권장<br>이어폰 마이크도 자동 사용됨</div>
+          </div>
+          <div style="padding:10px;background:#fef3c7;border-radius:8px;border:1px solid #fde68a">
+            <div style="font-size:12px;font-weight:700;color:#92400e;margin-bottom:4px">⚠️ 주의사항</div>
+            <div style="font-size:12px;color:#92400e">Firefox는 audio/webm 미지원으로 STT 오류 가능<br>마이크 권한 거부 시 브라우저 설정에서 재허용 필요<br>녹음 중 탭 전환 시 자동 중지될 수 있음</div>
+          </div>
+        </div>
+        <button class="btn btn-secondary btn-block" style="margin-top:10px" onclick="MemoNest.testMicPermission()">
+          <i class="fas fa-microphone"></i> 마이크 권한 테스트
+        </button>
+      </div>
+
+      <div style="font-size:12px;font-weight:700;color:var(--text-muted);text-transform:uppercase;margin-bottom:10px">📒 노션 연결</div>
+      <div style="background:#f8fafc;border-radius:12px;padding:14px;margin-bottom:14px">
+        <div style="font-size:12px;color:#475569;margin-bottom:8px">현재 연결된 노션 DB 수: <strong>${Object.keys(this.state.dbIds).length}/7</strong></div>
+        <button class="btn btn-secondary btn-block" onclick="MemoNest.resetSetup();document.getElementById('app-modal').remove()">
+          <i class="fas fa-redo"></i> 노션 DB 재연결
+        </button>
+      </div>
+
+      <button class="btn btn-primary btn-block" onclick="MemoNest.saveSettings()">
+        <i class="fas fa-save"></i> 설정 저장
+      </button>`);
+  },
+
+  toggleSTTSetting() {
+    const cb = document.getElementById('stt-enabled');
+    if (cb) cb.checked = !cb.checked;
+    const toggle = document.getElementById('stt-toggle');
+    if (toggle) {
+      const checked = document.getElementById('stt-enabled')?.checked;
+      toggle.style.background = checked ? '#6366f1' : '#e2e8f0';
+      const thumb = toggle.querySelector('span');
+      if (thumb) thumb.style.left = checked ? '23px' : '3px';
+    }
+  },
+
+  saveSettings() {
+    const enabled = document.getElementById('stt-enabled')?.checked ?? true;
+    const language = document.getElementById('stt-lang')?.value || 'ko';
+    const autoStop = parseInt(document.getElementById('stt-autostop')?.value || '10');
+    this.state.sttSettings = { enabled, language, autoStop };
+    this.save('sttSettings', this.state.sttSettings);
+    document.getElementById('app-modal')?.remove();
+    this.toast('✅ 설정이 저장되었어요', 'success');
+  },
+
+  async testMicPermission() {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream.getTracks().forEach(t => t.stop());
+      this.toast('✅ 마이크 권한이 허용되어 있어요!', 'success');
+    } catch (e) {
+      if (e.name === 'NotAllowedError') this.toast('❌ 마이크 권한이 거부되어 있어요. 브라우저 설정에서 허용해주세요.', 'error', 5000);
+      else if (e.name === 'NotFoundError') this.toast('❌ 마이크 장치를 찾을 수 없어요', 'error');
+      else this.toast(`마이크 오류: ${e.message}`, 'error');
+    }
+  },
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // CHANGELOG (개발 로그)
+  // ══════════════════════════════════════════════════════════════════════════
+  showChangelog() {
+    const logHtml = this.CHANGELOG.map(entry => `
+      <div style="margin-bottom:16px;padding:14px;background:#f8fafc;border-radius:12px;border-left:3px solid var(--primary)">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+          <span style="font-size:13px;font-weight:700;color:var(--primary)">v${entry.ver}</span>
+          <span style="font-size:11px;color:#94a3b8;background:white;padding:2px 8px;border-radius:20px;border:1px solid #e2e8f0">${entry.date}</span>
+        </div>
+        <ul style="margin:0;padding-left:16px;font-size:12px;color:#475569;line-height:1.8">
+          ${entry.changes.map(c => `<li>${c}</li>`).join('')}
+        </ul>
+      </div>`).join('');
+
+    this.showModal(`📋 개발 로그 — MemoNest v${this.VERSION}`, `
+      <div style="max-height:60vh;overflow-y:auto;padding-right:4px">
+        ${logHtml}
+        <div style="margin-top:12px;padding:12px;background:rgba(99,102,241,0.06);border-radius:10px;font-size:12px;color:#64748b;text-align:center">
+          <strong>MemoNest</strong> — Notion 연동 스마트 메모앱<br>
+          Hono + Cloudflare Pages · Gemini 1.5 Flash · Groq Whisper<br>
+          <span style="color:var(--primary)">v${this.VERSION}</span>
+        </div>
+      </div>`);
   },
 
   // ── Tag Helper ─────────────────────────────────────────────────────────────

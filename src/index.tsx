@@ -45,18 +45,19 @@ async function geminiRequest(apiKey: string, prompt: string) {
 }
 
 // ─── Groq STT Helper ─────────────────────────────────────────────────────────
-async function groqSTT(apiKey: string, audioBase64: string, mimeType: string) {
+async function groqSTT(apiKey: string, audioBase64: string, mimeType: string, language = 'ko') {
   // Groq Whisper API
   const binaryStr = atob(audioBase64)
   const bytes = new Uint8Array(binaryStr.length)
   for (let i = 0; i < binaryStr.length; i++) {
     bytes[i] = binaryStr.charCodeAt(i)
   }
+  const ext = mimeType.includes('ogg') ? 'ogg' : mimeType.includes('mp4') ? 'mp4' : 'webm'
   const blob = new Blob([bytes], { type: mimeType })
   const formData = new FormData()
-  formData.append('file', blob, 'audio.webm')
+  formData.append('file', blob, `audio.${ext}`)
   formData.append('model', 'whisper-large-v3')
-  formData.append('language', 'ko')
+  formData.append('language', language)
 
   const res = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
     method: 'POST',
@@ -697,13 +698,13 @@ app.get('/api/schedules', async (c) => {
 // ─── STT API ──────────────────────────────────────────────────────────────────
 app.post('/api/stt', async (c) => {
   const groqKey = c.env.GROQ_API_KEY
-  const { audioBase64, mimeType } = await c.req.json()
+  const { audioBase64, mimeType, language } = await c.req.json()
 
   try {
-    const text = await groqSTT(groqKey, audioBase64, mimeType || 'audio/webm')
+    const text = await groqSTT(groqKey, audioBase64, mimeType || 'audio/webm', language || 'ko')
     return c.json({ text })
   } catch (e: any) {
-    return c.json({ error: e.message }, 500)
+    return c.json({ error: e.message, text: '' }, 500)
   }
 })
 
