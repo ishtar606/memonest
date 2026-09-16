@@ -70,21 +70,165 @@ const MemoNest = {
     if (onConfirm) document.getElementById('modal-confirm-btn').onclick = onConfirm;
   },
 
+  // ── Is PC ──────────────────────────────────────────────────────────────────
+  isPC() { return window.innerWidth >= 768; },
+
   // ── Render ─────────────────────────────────────────────────────────────────
   render() {
     const app = document.getElementById('app');
+    // 기존 FAB 제거
+    document.querySelectorAll('.fab, .pc-fab').forEach(el => el.remove());
+
     if (!this.state.isSetupDone) {
-      app.innerHTML = this.renderSetup();
+      app.innerHTML = `<div class="mobile-layout" style="display:block">${this.renderSetup()}</div>`;
       return;
     }
+
+    if (this.isPC()) {
+      this.renderPC(app);
+    } else {
+      this.renderMobile(app);
+    }
+    this.afterRender(this.state.currentModule);
+  },
+
+  // ── PC Render ──────────────────────────────────────────────────────────────
+  renderPC(app) {
     app.innerHTML = `
+    <div class="pc-layout" style="display:flex">
+      ${this.renderPCSidebar()}
+      <div class="pc-main">
+        ${this.renderPCHeader()}
+        <div class="pc-content" id="main-content">
+          ${this.renderModule(this.state.currentModule)}
+        </div>
+      </div>
+    </div>`;
+    this.attachPCFAB();
+  },
+
+  // ── Mobile Render ──────────────────────────────────────────────────────────
+  renderMobile(app) {
+    app.innerHTML = `
+    <div class="mobile-layout" style="display:flex;flex-direction:column;min-height:100vh">
       ${this.renderHeader()}
       <main class="main-content" id="main-content">
         ${this.renderModule(this.state.currentModule)}
       </main>
-      ${this.renderBottomNav()}`;
+      ${this.renderBottomNav()}
+    </div>`;
     this.attachFAB();
-    this.afterRender(this.state.currentModule);
+  },
+
+  // ── PC Sidebar ─────────────────────────────────────────────────────────────
+  renderPCSidebar() {
+    const navGroups = [
+      { label: '메인', items: [
+        { id: 'home', icon: '🏠', name: '홈 대시보드' },
+      ]},
+      { label: '일정 & 할 일', items: [
+        { id: 'todo', icon: '📋', name: 'ToDo 관리' },
+        { id: 'schedule', icon: '📅', name: '일정 관리' },
+      ]},
+      { label: '메모 & 기록', items: [
+        { id: 'meeting', icon: '🎙️', name: '회의록' },
+        { id: 'idea', icon: '💡', name: '아이디어' },
+        { id: 'novel', icon: '📖', name: '소설 메모' },
+      ]},
+      { label: '생활', items: [
+        { id: 'shopping', icon: '🛒', name: '장보기' },
+        { id: 'diary', icon: '📔', name: '일기' },
+      ]},
+    ];
+    return `
+    <aside class="pc-sidebar">
+      <div class="pc-sidebar-logo">
+        <h1>🪺 MemoNest</h1>
+        <p>스마트 노션 메모앱</p>
+      </div>
+      ${navGroups.map(group => `
+        <div class="pc-nav-section">
+          <div class="pc-nav-label">${group.label}</div>
+          ${group.items.map(item => `
+            <button class="pc-nav-item ${this.state.currentModule === item.id ? 'active' : ''}"
+              onclick="MemoNest.navigate('${item.id}')">
+              <span class="nav-icon">${item.icon}</span>
+              <span>${item.name}</span>
+            </button>`).join('')}
+        </div>`).join('')}
+      <div style="margin-top:auto;padding:16px;border-top:1px solid var(--border)">
+        <button class="pc-nav-item" onclick="MemoNest.showMoreMenu()" style="color:#94a3b8">
+          <span class="nav-icon">⚙️</span><span>설정</span>
+        </button>
+        <a href="https://notion.so" target="_blank" class="pc-nav-item" style="text-decoration:none;display:flex;color:#94a3b8">
+          <span class="nav-icon">🔗</span><span>노션에서 보기</span>
+        </a>
+      </div>
+    </aside>`;
+  },
+
+  // ── PC Header ──────────────────────────────────────────────────────────────
+  renderPCHeader() {
+    const titles = {
+      home: { icon: '🪺', title: 'MemoNest 대시보드', sub: '오늘도 기록해요' },
+      todo: { icon: '📋', title: 'ToDo 관리', sub: '할 일을 체계적으로' },
+      schedule: { icon: '📅', title: '일정 관리', sub: '스케줄을 한눈에' },
+      meeting: { icon: '🎙️', title: '회의록', sub: 'STT + AI 자동 정리' },
+      shopping: { icon: '🛒', title: '장보기 목록', sub: 'AI 구매처 추천' },
+      idea: { icon: '💡', title: '아이디어 메모', sub: 'AI가 정리해드려요' },
+      novel: { icon: '📖', title: '소설 메모', sub: 'AI 시나리오 도우미' },
+      diary: { icon: '📔', title: '일기', sub: '크림이 · 대붕이 · 나의 일기' },
+    };
+    const info = titles[this.state.currentModule] || titles.home;
+    const today = new Date().toLocaleDateString('ko-KR', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' });
+    return `
+    <header class="pc-header">
+      <div>
+        <div class="pc-header-title">${info.icon} ${info.title}</div>
+        <div style="font-size:12px;color:var(--text-muted);margin-top:2px">${today} · ${info.sub}</div>
+      </div>
+      <div class="pc-header-actions">
+        <button class="pc-header-btn" onclick="MemoNest.showAddForCurrentModule()">
+          <i class="fas fa-plus"></i> 새로 추가
+        </button>
+        <a href="https://notion.so" target="_blank" class="pc-header-btn" style="text-decoration:none">
+          <i class="fas fa-external-link-alt"></i> 노션 열기
+        </a>
+      </div>
+    </header>`;
+  },
+
+  showAddForCurrentModule() {
+    const actions = {
+      todo: () => this.showAddTodo(),
+      schedule: () => this.showAddSchedule(),
+      meeting: () => {},
+      shopping: () => this.showAddShopping(),
+      idea: () => this.showAddIdea(),
+      novel: () => this.showAddNovel(),
+      diary: () => this.showAddDiary(),
+    };
+    const action = actions[this.state.currentModule];
+    if (action) action();
+  },
+
+  attachPCFAB() {
+    const fabConfigs = {
+      todo: { icon: 'fa-plus', action: () => this.showAddTodo() },
+      schedule: { icon: 'fa-plus', action: () => this.showAddSchedule() },
+      shopping: { icon: 'fa-plus', action: () => this.showAddShopping() },
+      idea: { icon: 'fa-lightbulb', action: () => this.showAddIdea() },
+      novel: { icon: 'fa-pen', action: () => this.showAddNovel() },
+      diary: { icon: 'fa-plus', action: () => this.showAddDiary() },
+    };
+    const config = fabConfigs[this.state.currentModule];
+    if (!config) return;
+    const fab = document.createElement('button');
+    fab.className = 'pc-fab';
+    fab.style.display = 'flex';
+    fab.innerHTML = `<i class="fas ${config.icon}"></i>`;
+    fab.onclick = config.action.bind(this);
+    document.body.appendChild(fab);
   },
 
   // ── Setup Screen ───────────────────────────────────────────────────────────
@@ -215,7 +359,25 @@ const MemoNest = {
       this.showMoreMenu(); return;
     }
     this.state.currentModule = module;
-    this.render();
+    if (this.isPC()) {
+      // PC: 사이드바·헤더·컨텐츠만 업데이트 (전체 리렌더 없이)
+      const app = document.getElementById('app');
+      document.querySelectorAll('.pc-fab').forEach(el => el.remove());
+      app.innerHTML = `
+        <div class="pc-layout" style="display:flex">
+          ${this.renderPCSidebar()}
+          <div class="pc-main">
+            ${this.renderPCHeader()}
+            <div class="pc-content" id="main-content">
+              ${this.renderModule(module)}
+            </div>
+          </div>
+        </div>`;
+      this.attachPCFAB();
+    } else {
+      this.render();
+    }
+    this.afterRender(module);
   },
 
   showMoreMenu() {
@@ -303,36 +465,69 @@ const MemoNest = {
     const greeting = hour < 12 ? '좋은 아침이에요! ☀️' : hour < 18 ? '안녕하세요! 👋' : '수고하셨어요! 🌙';
     const dateStr = now.toLocaleDateString('ko-KR', { month: 'long', day: 'numeric', weekday: 'long' });
 
+    const modules = [
+      { id:'todo', icon:'📋', name:'ToDo', desc:'할 일 관리' },
+      { id:'schedule', icon:'📅', name:'일정', desc:'스케줄' },
+      { id:'meeting', icon:'🎙️', name:'회의록', desc:'STT+AI' },
+      { id:'shopping', icon:'🛒', name:'장보기', desc:'AI 추천' },
+      { id:'idea', icon:'💡', name:'아이디어', desc:'AI 정리' },
+      { id:'novel', icon:'📖', name:'소설', desc:'시나리오' },
+      { id:'diary', icon:'📔', name:'일기', desc:'오늘의 기록' },
+      { id:'settings', icon:'⚙️', name:'설정', desc:'노션 연결' },
+    ];
+
+    if (this.isPC()) {
+      return `
+      <div class="pc-dashboard-banner">
+        <div>
+          <h2>${greeting}</h2>
+          <p>${dateStr} · 모든 메모는 노션에 자동 저장됩니다</p>
+        </div>
+        <span class="banner-emoji">🪺</span>
+      </div>
+      <div style="font-size:13px;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:14px">빠른 실행</div>
+      <div class="pc-module-grid">
+        ${modules.map(m => `
+          <div class="module-card" onclick="${m.id === 'settings' ? 'MemoNest.showMoreMenu()' : `MemoNest.navigate('${m.id}')`}">
+            <span class="icon">${m.icon}</span>
+            <div class="name">${m.name}</div>
+            <div class="count">${m.desc}</div>
+          </div>`).join('')}
+      </div>
+      <div class="card" style="margin-top:8px">
+        <div class="card-header">
+          <div class="card-title">💡 MemoNest 사용 가이드</div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;font-size:13px;color:#64748b">
+          <div style="padding:12px;background:#f8fafc;border-radius:10px">
+            <div style="font-weight:600;margin-bottom:4px;color:#1e293b">🎙️ 음성 입력</div>
+            회의록, 아이디어, 일기를 음성으로 입력하면 자동으로 텍스트 변환
+          </div>
+          <div style="padding:12px;background:#f8fafc;border-radius:10px">
+            <div style="font-weight:600;margin-bottom:4px;color:#1e293b">🤖 AI 구조화</div>
+            입력한 내용을 AI가 자동으로 분석·정리해서 노션에 템플릿으로 저장
+          </div>
+          <div style="padding:12px;background:#f8fafc;border-radius:10px">
+            <div style="font-weight:600;margin-bottom:4px;color:#1e293b">📒 노션 연동</div>
+            모든 데이터는 노션에 카테고리별로 자동 저장되어 언제든 조회 가능
+          </div>
+        </div>
+      </div>`;
+    }
+
+    // Mobile
     return `
-    <div class="dashboard-greeting">
-      <h2>${greeting}</h2>
-      <p>${dateStr}</p>
+    <div style="background:linear-gradient(135deg,#6366f1,#8b5cf6);color:white;padding:20px;border-radius:16px;margin-bottom:16px">
+      <h2 style="font-size:20px;font-weight:700;margin-bottom:4px">${greeting}</h2>
+      <p style="font-size:13px;opacity:0.8">${dateStr}</p>
     </div>
-    <div class="module-grid">
-      ${[
-        { id:'todo', icon:'📋', name:'ToDo', desc:'할 일 관리' },
-        { id:'schedule', icon:'📅', name:'일정', desc:'스케줄' },
-        { id:'meeting', icon:'🎙️', name:'회의록', desc:'STT+AI' },
-        { id:'shopping', icon:'🛒', name:'장보기', desc:'AI 추천' },
-        { id:'idea', icon:'💡', name:'아이디어', desc:'AI 정리' },
-        { id:'novel', icon:'📖', name:'소설', desc:'시나리오' },
-        { id:'diary', icon:'📔', name:'일기', desc:'오늘의 기록' },
-        { id:'settings', icon:'⚙️', name:'설정', desc:'노션 연결' },
-      ].map(m => `
+    <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-bottom:16px">
+      ${modules.map(m => `
         <div class="module-card" onclick="${m.id === 'settings' ? 'MemoNest.showMoreMenu()' : `MemoNest.navigate('${m.id}')`}">
           <span class="icon">${m.icon}</span>
           <div class="name">${m.name}</div>
           <div class="count">${m.desc}</div>
         </div>`).join('')}
-    </div>
-    <div class="card">
-      <div class="card-header">
-        <div class="card-title">🪺 MemoNest 소개</div>
-      </div>
-      <p style="font-size:13px;color:#64748b;line-height:1.6">
-        모든 메모는 <strong>노션에 자동으로 저장</strong>됩니다.<br>
-        음성 녹음 → STT → AI 구조화까지 한번에! 🤖
-      </p>
     </div>`;
   },
 
@@ -1307,4 +1502,12 @@ const MemoNest = {
 };
 
 // ── Bootstrap ──────────────────────────────────────────────────────────────
-document.addEventListener('DOMContentLoaded', () => MemoNest.init());
+document.addEventListener('DOMContentLoaded', () => {
+  MemoNest.init();
+  // 창 크기 변경 시 레이아웃 전환
+  let resizeTimer;
+  window.addEventListener('resize', () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => MemoNest.render(), 200);
+  });
+});
