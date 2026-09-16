@@ -4,8 +4,14 @@
 const MemoNest = {
   // ── State ──────────────────────────────────────────────────────────────────
   // ── 앱 버전/개발 로그 ─────────────────────────────────────────────────────
-  VERSION: '2.1.2',
+  VERSION: '2.1.3',
   CHANGELOG: [
+    { ver: '2.1.3', date: '2026-09-16', changes: [
+      'Bug Fix: 일정 장소+비대면 링크 동시 저장 지원 — 2개 입력칸 분리 (장소명 / 비대면 링크)',
+      '저장 포맷: "장소명\\n[링크]" 구분자 — Notion DB 스키마 변경 없이 둘 다 저장',
+      '목록: 장소(Maps) + 비대면링크 동시 표시, 각각 독립 클릭 가능',
+      '구버전 단일 필드 데이터 자동 호환',
+    ] },
     { ver: '2.1.2', date: '2026-09-16', changes: [
       '일정 장소: 실제 장소 입력 → Google Maps 링크로 자동 변환 (목록에서 클릭 시 지도 팝업)',
       '일정 장소: Zoom·Meet·Teams 등 비대면 링크 감지 → 목록에서 바로 클릭 입장 가능',
@@ -352,14 +358,38 @@ const MemoNest = {
   },
 
   // ── 장소 헬퍼 ─────────────────────────────────────────────────────────────
-  // URL 여부 판별 (http/https/zoom/meet/teams 등)
-  _isUrl(str) {
-    return /^(https?:\/\/|zoom\.us|meet\.google\.com|teams\.microsoft\.com)/i.test(str.trim());
+  // 저장 포맷: "장소명\n[링크]" — 장소만, 링크만, 둘 다 모두 가능
+  // _parseLocation(raw) → { place, link }
+  _parseLocation(raw) {
+    if (!raw) return { place: '', link: '' };
+    const parts = raw.split('\n');
+    const place = (parts[0] || '').trim();
+    // 두 번째 줄이 있고 [링크] 형식이면 링크 추출
+    const linkLine = (parts[1] || '').trim();
+    const link = linkLine.startsWith('[') && linkLine.endsWith(']')
+      ? linkLine.slice(1, -1).trim()
+      : '';
+    return { place, link };
   },
 
-  // 비대면 링크 브랜드 감지 → 아이콘+이름 반환
+  // { place, link } → Notion 저장용 문자열
+  _serializeLocation(place, link) {
+    const p = (place || '').trim();
+    const l = (link || '').trim();
+    if (p && l) return `${p}\n[${l}]`;
+    if (p) return p;
+    if (l) return l;
+    return '';
+  },
+
+  // URL 여부 판별
+  _isUrl(str) {
+    return /^(https?:\/\/|zoom\.us|meet\.google\.com|teams\.microsoft\.com)/i.test((str || '').trim());
+  },
+
+  // 비대면 링크 브랜드 감지 → 아이콘+이름
   _getOnlineMeta(url) {
-    const u = url.toLowerCase();
+    const u = (url || '').toLowerCase();
     if (u.includes('zoom.us') || u.includes('zoom.com')) return { icon: '📹', name: 'Zoom 참여' };
     if (u.includes('meet.google.com')) return { icon: '🟢', name: 'Google Meet 참여' };
     if (u.includes('teams.microsoft.com')) return { icon: '🟣', name: 'Teams 참여' };
@@ -369,50 +399,60 @@ const MemoNest = {
     return { icon: '🌐', name: '링크 열기' };
   },
 
-  // 장소 문자열 → 목록 표시용 HTML 렌더
-  _renderLocationBadge(location) {
-    if (!location) return '';
-    const loc = location.trim();
-    // URL이면 비대면 링크 처리
-    if (this._isUrl(loc)) {
-      const href = loc.startsWith('http') ? loc : `https://${loc}`;
-      const meta = this._getOnlineMeta(loc);
-      return `<a href="${href}" target="_blank" rel="noopener"
+  // 장소 raw 문자열 → 목록 표시용 HTML (장소 + 링크 둘 다 표시 가능)
+  _renderLocationBadge(raw) {
+    if (!raw) return '';
+    const { place, link } = this._parseLocation(raw);
+    let html = '';
+
+    // 장소명 → Google Maps 링크
+    if (place && !this._isUrl(place)) {
+      const mapsUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(place)}`;
+      html += `<a href="${mapsUrl}" target="_blank" rel="noopener"
+        style="font-size:12px;color:#64748b;display:inline-flex;align-items:center;gap:4px;text-decoration:none;cursor:pointer"
+        title="Google Maps에서 보기">
+        <i class="fas fa-map-marker-alt" style="color:#ef4444"></i> ${place}
+        <i class="fas fa-external-link-alt" style="font-size:10px;opacity:0.5"></i>
+      </a>`;
+    } else if (place && this._isUrl(place)) {
+      // place 자리에 URL만 넣은 구버전 데이터 호환
+      const href = place.startsWith('http') ? place : `https://${place}`;
+      const meta = this._getOnlineMeta(place);
+      html += `<a href="${href}" target="_blank" rel="noopener"
         style="font-size:12px;color:#6366f1;display:inline-flex;align-items:center;gap:4px;
                background:rgba(99,102,241,0.08);border:1px solid rgba(99,102,241,0.2);
-               border-radius:20px;padding:2px 10px;text-decoration:none;cursor:pointer"
-        title="${href}">
-        ${meta.icon} ${meta.name}
-      </a>`;
+               border-radius:20px;padding:2px 10px;text-decoration:none;"
+        title="${href}">${meta.icon} ${meta.name}</a>`;
     }
-    // 일반 장소 → Google Maps 링크
-    const mapsUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(loc)}`;
-    return `<a href="${mapsUrl}" target="_blank" rel="noopener"
-      style="font-size:12px;color:#64748b;display:inline-flex;align-items:center;gap:4px;
-             text-decoration:none;cursor:pointer"
-      title="Google Maps에서 보기">
-      <i class="fas fa-map-marker-alt" style="color:#ef4444"></i> ${loc}
-      <i class="fas fa-external-link-alt" style="font-size:10px;opacity:0.5"></i>
-    </a>`;
+
+    // 비대면 링크
+    if (link) {
+      const href = link.startsWith('http') ? link : `https://${link}`;
+      const meta = this._getOnlineMeta(link);
+      html += `${place ? '<span style="margin:0 2px;color:#d1d5db">·</span>' : ''}
+        <a href="${href}" target="_blank" rel="noopener"
+          style="font-size:12px;color:#6366f1;display:inline-flex;align-items:center;gap:4px;
+                 background:rgba(99,102,241,0.08);border:1px solid rgba(99,102,241,0.2);
+                 border-radius:20px;padding:2px 10px;text-decoration:none;"
+          title="${href}">${meta.icon} ${meta.name}</a>`;
+    }
+
+    return html;
   },
 
-  // 장소 입력값 변경 시 → 확인 팝업 표시
+  // 장소 입력 hint (각 필드별)
   onLocationInput(inputId) {
-    const val = document.getElementById(inputId)?.value?.trim();
-    if (!val) return;
+    const val = (document.getElementById(inputId)?.value || '').trim();
     const hint = document.getElementById(inputId + '-hint');
     if (!hint) return;
+    if (!val) { hint.innerHTML = ''; return; }
     if (this._isUrl(val)) {
       const meta = this._getOnlineMeta(val);
-      hint.innerHTML = `<span style="color:#6366f1;font-size:11px">${meta.icon} 비대면 링크로 저장돼요 → 목록에서 바로 클릭 가능</span>`;
+      hint.innerHTML = `<span style="color:#6366f1;font-size:11px">${meta.icon} 비대면 링크 감지 → 목록에서 바로 클릭 가능</span>`;
     } else if (val.length >= 2) {
       const mapsUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(val)}`;
-      hint.innerHTML = `<span style="color:#64748b;font-size:11px">
-        📍 실제 장소로 저장 →
-        <a href="${mapsUrl}" target="_blank" rel="noopener"
-           style="color:#ef4444;text-decoration:underline">Google Maps에서 확인</a>
-        해보세요
-      </span>`;
+      hint.innerHTML = `<span style="color:#64748b;font-size:11px">📍 실제 장소 →
+        <a href="${mapsUrl}" target="_blank" rel="noopener" style="color:#ef4444;text-decoration:underline">Google Maps 확인</a></span>`;
     } else {
       hint.innerHTML = '';
     }
@@ -2368,10 +2408,16 @@ const MemoNest = {
         </div>
       </div>
       <div class="form-group">
-        <label class="form-label">장소 / 비대면 링크</label>
-        <input class="form-input" id="edit-sch-location" value="${location}"
+        <label class="form-label">📍 장소</label>
+        <input class="form-input" id="edit-sch-location" placeholder="강남역 스타벅스 (선택)"
           oninput="MemoNest.onLocationInput('edit-sch-location')">
         <div id="edit-sch-location-hint" style="margin-top:4px;min-height:16px"></div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">🌐 비대면 링크</label>
+        <input class="form-input" id="edit-sch-online-link" placeholder="Zoom·Meet·Teams URL (선택)"
+          oninput="MemoNest.onLocationInput('edit-sch-online-link')">
+        <div id="edit-sch-online-link-hint" style="margin-top:4px;min-height:16px"></div>
       </div>
       <div class="form-group">
         <label class="form-label">메모</label>
@@ -2380,8 +2426,21 @@ const MemoNest = {
       <button class="btn btn-primary btn-block" onclick="MemoNest.saveEditSchedule('${pageId}')">
         <i class="fas fa-save"></i> 수정 저장
       </button>`, null);
-    // 기존 location 값이 있으면 hint 즉시 표시
-    if (location) setTimeout(() => this.onLocationInput('edit-sch-location'), 50);
+    // 기존 location 파싱 → 각 필드에 채우기 + hint 표시
+    if (location) {
+      const { place, link } = this._parseLocation(location);
+      setTimeout(() => {
+        const locEl = document.getElementById('edit-sch-location');
+        const linkEl = document.getElementById('edit-sch-online-link');
+        if (locEl && place) { locEl.value = place; this.onLocationInput('edit-sch-location'); }
+        if (linkEl && link) { linkEl.value = link; this.onLocationInput('edit-sch-online-link'); }
+        // place가 URL인 구버전 데이터 호환: place 자리에 링크만 있던 경우
+        if (locEl && !place && this._isUrl(location.trim())) {
+          locEl.value = '';
+          if (linkEl) { linkEl.value = location.trim(); this.onLocationInput('edit-sch-online-link'); }
+        }
+      }, 50);
+    }
   },
 
   async saveEditSchedule(pageId) {
@@ -2401,7 +2460,10 @@ const MemoNest = {
         body: JSON.stringify({
           title: document.getElementById('edit-sch-title')?.value,
           datetime: datetimeISO,
-          location: document.getElementById('edit-sch-location')?.value || '',
+          location: this._serializeLocation(
+            document.getElementById('edit-sch-location')?.value || '',
+            document.getElementById('edit-sch-online-link')?.value || ''
+          ),
           category: document.getElementById('edit-sch-category')?.value,
           reminder: document.getElementById('edit-sch-reminder')?.value,
           memo: document.getElementById('edit-sch-memo')?.value || '',
@@ -2488,10 +2550,16 @@ const MemoNest = {
         </div>
       </div>
       <div class="form-group">
-        <label class="form-label">장소 / 비대면 링크</label>
-        <input class="form-input" id="sch-location" placeholder="장소명 또는 Zoom·Meet 링크"
+        <label class="form-label">📍 장소</label>
+        <input class="form-input" id="sch-location" placeholder="강남역 스타벅스 (선택)"
           oninput="MemoNest.onLocationInput('sch-location')">
         <div id="sch-location-hint" style="margin-top:4px;min-height:16px"></div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">🌐 비대면 링크</label>
+        <input class="form-input" id="sch-online-link" placeholder="Zoom·Meet·Teams URL (선택)"
+          oninput="MemoNest.onLocationInput('sch-online-link')">
+        <div id="sch-online-link-hint" style="margin-top:4px;min-height:16px"></div>
       </div>
       <div class="form-group">
         <label class="form-label">메모</label>
@@ -2526,7 +2594,10 @@ const MemoNest = {
         body: JSON.stringify({
           dbId: this.state.dbIds.schedule, title,
           datetime: datetimeISO,
-          location: document.getElementById('sch-location')?.value,
+          location: this._serializeLocation(
+            document.getElementById('sch-location')?.value || '',
+            document.getElementById('sch-online-link')?.value || ''
+          ),
           category: document.getElementById('sch-category')?.value,
           reminder: document.getElementById('sch-reminder')?.value,
           memo: document.getElementById('sch-memo')?.value,
