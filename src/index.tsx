@@ -131,211 +131,298 @@ async function groqSTT(apiKey: string, audioBase64: string, mimeType: string, la
 // API ROUTES
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// ─── Notion DB 초기화 ─────────────────────────────────────────────────────────
+// ─── Notion DB 초기화 (기존 DB 감지 후 재사용) ───────────────────────────────
 app.post('/api/notion/init', async (c) => {
   const { parentPageId } = await c.req.json()
   const apiKey = c.env.NOTION_API_KEY
 
+  // 1단계: 루트 페이지의 기존 자식 DB 목록 조회
+  const childrenRes = await notionRequest(apiKey, `/blocks/${parentPageId}/children?page_size=100`)
+  const existingDBs: Record<string, string> = {}
+
+  const dbTitleMap: Record<string, string> = {
+    '📋 ToDo Manager':      'todo',
+    '📅 Schedule Manager':  'schedule',
+    '🎙️ Meeting Notes':     'meeting',
+    '🛒 Shopping List':     'shopping',
+    '💡 Idea Memo':         'idea',
+    '📖 Novel Memo':        'novel',
+    '📔 Diary':             'diary',
+  }
+
+  if (childrenRes.results) {
+    for (const block of childrenRes.results) {
+      if (block.type === 'child_database') {
+        const dbTitle = block.child_database?.title || ''
+        const key = dbTitleMap[dbTitle]
+        if (key && !existingDBs[key]) {
+          // 첫 번째 매칭 DB만 사용 (이중생성 방지: 가장 오래된 것 우선)
+          existingDBs[key] = block.id.replace(/-/g, '')
+        }
+      }
+    }
+  }
+
   const databases: Record<string, any> = {}
+  const DB_KEYS = ['todo','schedule','meeting','shopping','idea','novel','diary']
 
-  // 1. ToDo DB
-  const todoDB = await notionRequest(apiKey, '/databases', 'POST', {
-    parent: { type: 'page_id', page_id: parentPageId },
-    icon: { type: 'emoji', emoji: '📋' },
-    title: [{ type: 'text', text: { content: '📋 ToDo Manager' } }],
-    properties: {
-      '할 일': { title: {} },
-      '상태': { select: { options: [
-        { name: '미완료', color: 'red' },
-        { name: '진행중', color: 'yellow' },
-        { name: '완료', color: 'green' },
-        { name: '보류', color: 'gray' }
-      ]}},
-      '우선순위': { select: { options: [
-        { name: '높음 🔴', color: 'red' },
-        { name: '중간 🟡', color: 'yellow' },
-        { name: '낮음 🟢', color: 'green' }
-      ]}},
-      'Due Date': { date: {} },
-      '태그': { multi_select: { options: [] } },
-      '반복': { select: { options: [
-        { name: '없음', color: 'default' },
-        { name: '매일', color: 'blue' },
-        { name: '매주', color: 'purple' },
-        { name: '매월', color: 'pink' }
-      ]}},
-      '메모': { rich_text: {} },
-      '생성일': { created_time: {} },
-    }
-  })
-  databases.todo = todoDB.id
+  // 2단계: 이미 존재하는 DB는 재사용, 없는 것만 생성
+  const missing = DB_KEYS.filter(k => !existingDBs[k])
 
-  // 2. Schedule DB
-  const scheduleDB = await notionRequest(apiKey, '/databases', 'POST', {
-    parent: { type: 'page_id', page_id: parentPageId },
-    icon: { type: 'emoji', emoji: '📅' },
-    title: [{ type: 'text', text: { content: '📅 Schedule Manager' } }],
-    properties: {
-      '일정 제목': { title: {} },
-      '날짜/시간': { date: {} },
-      '장소': { rich_text: {} },
-      '카테고리': { select: { options: [
-        { name: '회의', color: 'blue' },
-        { name: '개인', color: 'green' },
-        { name: '이벤트', color: 'pink' },
-        { name: '약속', color: 'orange' },
-        { name: '기타', color: 'gray' }
-      ]}},
-      '알림': { select: { options: [
-        { name: '없음', color: 'default' },
-        { name: '10분 전', color: 'blue' },
-        { name: '1시간 전', color: 'yellow' },
-        { name: '1일 전', color: 'red' }
-      ]}},
-      '메모': { rich_text: {} },
-      '생성일': { created_time: {} },
-    }
-  })
-  databases.schedule = scheduleDB.id
+  // 기존 DB ID 복사
+  for (const k of DB_KEYS) {
+    if (existingDBs[k]) databases[k] = existingDBs[k]
+  }
 
-  // 3. Meeting Notes DB
-  const meetingDB = await notionRequest(apiKey, '/databases', 'POST', {
-    parent: { type: 'page_id', page_id: parentPageId },
-    icon: { type: 'emoji', emoji: '🎙️' },
-    title: [{ type: 'text', text: { content: '🎙️ Meeting Notes' } }],
-    properties: {
-      '회의 제목': { title: {} },
-      '날짜': { date: {} },
-      '고객사/프로젝트': { rich_text: {} },
-      '참석자': { rich_text: {} },
-      '태그': { multi_select: { options: [] } },
-      '요약': { rich_text: {} },
-      '액션 아이템': { rich_text: {} },
-      '생성일': { created_time: {} },
-    }
-  })
-  databases.meeting = meetingDB.id
+  if (missing.length === 0) {
+    // 모든 DB 이미 존재 → 그냥 반환
+    return c.json({ success: true, databases, reused: true, message: '기존 DB를 재사용합니다' })
+  }
 
-  // 4. Shopping List DB
-  const shoppingDB = await notionRequest(apiKey, '/databases', 'POST', {
-    parent: { type: 'page_id', page_id: parentPageId },
-    icon: { type: 'emoji', emoji: '🛒' },
-    title: [{ type: 'text', text: { content: '🛒 Shopping List' } }],
-    properties: {
-      '아이템': { title: {} },
-      '수량': { rich_text: {} },
-      '구매처 추천': { rich_text: {} },
-      '국가': { select: { options: [
-        { name: '🇺🇸 미국', color: 'blue' },
-        { name: '🇰🇷 한국', color: 'red' },
-        { name: '🌐 온라인', color: 'purple' }
-      ]}},
-      '카테고리': { select: { options: [
-        { name: '식품', color: 'green' },
-        { name: '생활용품', color: 'yellow' },
-        { name: '가전', color: 'blue' },
-        { name: '의류', color: 'pink' },
-        { name: '기타', color: 'gray' }
-      ]}},
-      '구매완료': { checkbox: {} },
-      '태그': { multi_select: { options: [] } },
-      '생성일': { created_time: {} },
-    }
-  })
-  databases.shopping = shoppingDB.id
+  // 3단계: 없는 DB만 생성
+  if (missing.includes('todo')) {
+    const todoDB = await notionRequest(apiKey, '/databases', 'POST', {
+      parent: { type: 'page_id', page_id: parentPageId },
+      icon: { type: 'emoji', emoji: '📋' },
+      title: [{ type: 'text', text: { content: '📋 ToDo Manager' } }],
+      properties: {
+        '할 일': { title: {} },
+        '상태': { select: { options: [
+          { name: '미완료', color: 'red' },
+          { name: '진행중', color: 'yellow' },
+          { name: '완료', color: 'green' },
+          { name: '보류', color: 'gray' }
+        ]}},
+        '우선순위': { select: { options: [
+          { name: '높음 🔴', color: 'red' },
+          { name: '중간 🟡', color: 'yellow' },
+          { name: '낮음 🟢', color: 'green' }
+        ]}},
+        'Due Date': { date: {} },
+        '태그': { multi_select: { options: [] } },
+        '반복': { select: { options: [
+          { name: '없음', color: 'default' },
+          { name: '매일', color: 'blue' },
+          { name: '매주', color: 'purple' },
+          { name: '매월', color: 'pink' }
+        ]}},
+        '메모': { rich_text: {} },
+        '생성일': { created_time: {} },
+      }
+    })
+    databases.todo = todoDB.id
+  }
 
-  // 5. Idea Memo DB
-  const ideaDB = await notionRequest(apiKey, '/databases', 'POST', {
-    parent: { type: 'page_id', page_id: parentPageId },
-    icon: { type: 'emoji', emoji: '💡' },
-    title: [{ type: 'text', text: { content: '💡 Idea Memo' } }],
-    properties: {
-      '아이디어 제목': { title: {} },
-      '카테고리': { select: { options: [
-        { name: '비즈니스', color: 'blue' },
-        { name: '기술', color: 'green' },
-        { name: '라이프', color: 'yellow' },
-        { name: '창작', color: 'pink' },
-        { name: '기타', color: 'gray' }
-      ]}},
-      '핵심 내용': { rich_text: {} },
-      '태그': { multi_select: { options: [] } },
-      '실현 가능성': { select: { options: [
-        { name: '높음', color: 'green' },
-        { name: '중간', color: 'yellow' },
-        { name: '낮음', color: 'red' },
-        { name: '미평가', color: 'gray' }
-      ]}},
-      '생성일': { created_time: {} },
-    }
-  })
-  databases.idea = ideaDB.id
+  if (missing.includes('schedule')) {
+    const scheduleDB = await notionRequest(apiKey, '/databases', 'POST', {
+      parent: { type: 'page_id', page_id: parentPageId },
+      icon: { type: 'emoji', emoji: '📅' },
+      title: [{ type: 'text', text: { content: '📅 Schedule Manager' } }],
+      properties: {
+        '일정 제목': { title: {} },
+        '날짜/시간': { date: {} },
+        '장소': { rich_text: {} },
+        '카테고리': { select: { options: [
+          { name: '회의', color: 'blue' },
+          { name: '개인', color: 'green' },
+          { name: '이벤트', color: 'pink' },
+          { name: '약속', color: 'orange' },
+          { name: '기타', color: 'gray' }
+        ]}},
+        '알림': { select: { options: [
+          { name: '없음', color: 'default' },
+          { name: '10분 전', color: 'blue' },
+          { name: '1시간 전', color: 'yellow' },
+          { name: '1일 전', color: 'red' }
+        ]}},
+        '메모': { rich_text: {} },
+        '생성일': { created_time: {} },
+      }
+    })
+    databases.schedule = scheduleDB.id
+  }
 
-  // 6. Novel Memo DB
-  const novelDB = await notionRequest(apiKey, '/databases', 'POST', {
-    parent: { type: 'page_id', page_id: parentPageId },
-    icon: { type: 'emoji', emoji: '📖' },
-    title: [{ type: 'text', text: { content: '📖 Novel Memo' } }],
-    properties: {
-      '작품명': { title: {} },
-      '장르': { select: { options: [
-        { name: '로맨스', color: 'pink' },
-        { name: '미스터리', color: 'purple' },
-        { name: 'SF', color: 'blue' },
-        { name: '판타지', color: 'green' },
-        { name: '현대물', color: 'yellow' },
-        { name: '기타', color: 'gray' }
-      ]}},
-      '배경': { rich_text: {} },
-      '주인공': { rich_text: {} },
-      '핵심 소재': { rich_text: {} },
-      '진행 상태': { select: { options: [
-        { name: '아이디어', color: 'gray' },
-        { name: '기획중', color: 'yellow' },
-        { name: '집필중', color: 'blue' },
-        { name: '완성', color: 'green' }
-      ]}},
-      '태그': { multi_select: { options: [] } },
-      '생성일': { created_time: {} },
-    }
-  })
-  databases.novel = novelDB.id
+  if (missing.includes('meeting')) {
+    const meetingDB = await notionRequest(apiKey, '/databases', 'POST', {
+      parent: { type: 'page_id', page_id: parentPageId },
+      icon: { type: 'emoji', emoji: '🎙️' },
+      title: [{ type: 'text', text: { content: '🎙️ Meeting Notes' } }],
+      properties: {
+        '회의 제목': { title: {} },
+        '날짜': { date: {} },
+        '고객사/프로젝트': { rich_text: {} },
+        '참석자': { rich_text: {} },
+        '태그': { multi_select: { options: [] } },
+        '요약': { rich_text: {} },
+        '액션 아이템': { rich_text: {} },
+        '생성일': { created_time: {} },
+      }
+    })
+    databases.meeting = meetingDB.id
+  }
 
-  // 7. Diary DB
-  const diaryDB = await notionRequest(apiKey, '/databases', 'POST', {
-    parent: { type: 'page_id', page_id: parentPageId },
-    icon: { type: 'emoji', emoji: '📔' },
-    title: [{ type: 'text', text: { content: '📔 Diary' } }],
-    properties: {
-      '제목': { title: {} },
-      '날짜': { date: {} },
-      '일기 종류': { select: { options: [
-        { name: '나의 일기', color: 'blue' },
-        { name: '🐶 크림이 일기', color: 'yellow' },
-        { name: '👶 대붕이 출산일기', color: 'pink' }
-      ]}},
-      '무드': { select: { options: [
-        { name: '😊 행복', color: 'yellow' },
-        { name: '😐 보통', color: 'gray' },
-        { name: '😢 슬픔', color: 'blue' },
-        { name: '😡 화남', color: 'red' },
-        { name: '😴 피곤', color: 'purple' }
-      ]}},
-      '날씨': { select: { options: [
-        { name: '☀️ 맑음', color: 'yellow' },
-        { name: '⛅ 흐림', color: 'gray' },
-        { name: '🌧️ 비', color: 'blue' },
-        { name: '❄️ 눈', color: 'default' }
-      ]}},
-      '한줄 요약': { rich_text: {} },
-      '태그': { multi_select: { options: [] } },
-      '생성일': { created_time: {} },
-    }
-  })
-  databases.diary = diaryDB.id
+  if (missing.includes('shopping')) {
+    const shoppingDB = await notionRequest(apiKey, '/databases', 'POST', {
+      parent: { type: 'page_id', page_id: parentPageId },
+      icon: { type: 'emoji', emoji: '🛒' },
+      title: [{ type: 'text', text: { content: '🛒 Shopping List' } }],
+      properties: {
+        '아이템': { title: {} },
+        '수량': { rich_text: {} },
+        '구매처 추천': { rich_text: {} },
+        '국가': { select: { options: [
+          { name: '🇺🇸 미국', color: 'blue' },
+          { name: '🇰🇷 한국', color: 'red' },
+          { name: '🌐 온라인', color: 'purple' }
+        ]}},
+        '카테고리': { select: { options: [
+          { name: '식품', color: 'green' },
+          { name: '생활용품', color: 'yellow' },
+          { name: '가전', color: 'blue' },
+          { name: '의류', color: 'pink' },
+          { name: '기타', color: 'gray' }
+        ]}},
+        '구매완료': { checkbox: {} },
+        '태그': { multi_select: { options: [] } },
+        '생성일': { created_time: {} },
+      }
+    })
+    databases.shopping = shoppingDB.id
+  }
 
-  return c.json({ success: true, databases })
+  if (missing.includes('idea')) {
+    const ideaDB = await notionRequest(apiKey, '/databases', 'POST', {
+      parent: { type: 'page_id', page_id: parentPageId },
+      icon: { type: 'emoji', emoji: '💡' },
+      title: [{ type: 'text', text: { content: '💡 Idea Memo' } }],
+      properties: {
+        '아이디어 제목': { title: {} },
+        '카테고리': { select: { options: [
+          { name: '비즈니스', color: 'blue' },
+          { name: '기술', color: 'green' },
+          { name: '라이프', color: 'yellow' },
+          { name: '창작', color: 'pink' },
+          { name: '기타', color: 'gray' }
+        ]}},
+        '핵심 내용': { rich_text: {} },
+        '태그': { multi_select: { options: [] } },
+        '실현 가능성': { select: { options: [
+          { name: '높음', color: 'green' },
+          { name: '중간', color: 'yellow' },
+          { name: '낮음', color: 'red' },
+          { name: '미평가', color: 'gray' }
+        ]}},
+        '생성일': { created_time: {} },
+      }
+    })
+    databases.idea = ideaDB.id
+  }
+
+  if (missing.includes('novel')) {
+    const novelDB = await notionRequest(apiKey, '/databases', 'POST', {
+      parent: { type: 'page_id', page_id: parentPageId },
+      icon: { type: 'emoji', emoji: '📖' },
+      title: [{ type: 'text', text: { content: '📖 Novel Memo' } }],
+      properties: {
+        '작품명': { title: {} },
+        '장르': { select: { options: [
+          { name: '로맨스', color: 'pink' },
+          { name: '미스터리', color: 'purple' },
+          { name: 'SF', color: 'blue' },
+          { name: '판타지', color: 'green' },
+          { name: '현대물', color: 'yellow' },
+          { name: '기타', color: 'gray' }
+        ]}},
+        '배경': { rich_text: {} },
+        '주인공': { rich_text: {} },
+        '핵심 소재': { rich_text: {} },
+        '진행 상태': { select: { options: [
+          { name: '아이디어', color: 'gray' },
+          { name: '기획중', color: 'yellow' },
+          { name: '집필중', color: 'blue' },
+          { name: '완성', color: 'green' }
+        ]}},
+        '태그': { multi_select: { options: [] } },
+        '생성일': { created_time: {} },
+      }
+    })
+    databases.novel = novelDB.id
+  }
+
+  if (missing.includes('diary')) {
+    const diaryDB = await notionRequest(apiKey, '/databases', 'POST', {
+      parent: { type: 'page_id', page_id: parentPageId },
+      icon: { type: 'emoji', emoji: '📔' },
+      title: [{ type: 'text', text: { content: '📔 Diary' } }],
+      properties: {
+        '제목': { title: {} },
+        '날짜': { date: {} },
+        '일기 종류': { select: { options: [
+          { name: '나의 일기', color: 'blue' },
+          { name: '🐶 크림이 일기', color: 'yellow' },
+          { name: '👶 대붕이 출산일기', color: 'pink' }
+        ]}},
+        '무드': { select: { options: [
+          { name: '😊 행복', color: 'yellow' },
+          { name: '😐 보통', color: 'gray' },
+          { name: '😢 슬픔', color: 'blue' },
+          { name: '😡 화남', color: 'red' },
+          { name: '😴 피곤', color: 'purple' }
+        ]}},
+        '날씨': { select: { options: [
+          { name: '☀️ 맑음', color: 'yellow' },
+          { name: '⛅ 흐림', color: 'gray' },
+          { name: '🌧️ 비', color: 'blue' },
+          { name: '❄️ 눈', color: 'default' }
+        ]}},
+        '한줄 요약': { rich_text: {} },
+        '태그': { multi_select: { options: [] } },
+        '생성일': { created_time: {} },
+      }
+    })
+    databases.diary = diaryDB.id
+  }
+
+  return c.json({ success: true, databases, reused: false, message: `${missing.length}개 DB 생성됨` })
 })
+
+// ─── Notion DB 복원 API (기존 DB ID 자동 탐색) ────────────────────────────────
+app.post('/api/notion/recover', async (c) => {
+  const { parentPageId } = await c.req.json()
+  const apiKey = c.env.NOTION_API_KEY
+
+  const childrenRes = await notionRequest(apiKey, `/blocks/${parentPageId}/children?page_size=100`)
+  if (!childrenRes.results) return c.json({ error: '페이지 조회 실패' }, 500)
+
+  const dbTitleMap: Record<string, string> = {
+    '📋 ToDo Manager':      'todo',
+    '📅 Schedule Manager':  'schedule',
+    '🎙️ Meeting Notes':     'meeting',
+    '🛒 Shopping List':     'shopping',
+    '💡 Idea Memo':         'idea',
+    '📖 Novel Memo':        'novel',
+    '📔 Diary':             'diary',
+  }
+
+  // 가장 오래된(첫 번째) DB만 사용
+  const databases: Record<string, string> = {}
+  const allFound: Array<{key:string, id:string, title:string, created:string}> = []
+
+  for (const block of childrenRes.results) {
+    if (block.type === 'child_database') {
+      const dbTitle = block.child_database?.title || ''
+      const key = dbTitleMap[dbTitle]
+      if (key) {
+        allFound.push({ key, id: block.id.replace(/-/g,''), title: dbTitle, created: block.created_time })
+        if (!databases[key]) databases[key] = block.id.replace(/-/g,'')
+      }
+    }
+  }
+
+  const found = Object.keys(databases).length
+  return c.json({ success: true, databases, found, allFound, message: `${found}개 DB 복원됨` })
+})
+
 
 // ─── ToDo API ────────────────────────────────────────────────────────────────
 app.get('/api/todos', async (c) => {

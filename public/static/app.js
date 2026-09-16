@@ -307,8 +307,14 @@ const MemoNest = {
         <p>위 페이지 안에 7개의 데이터베이스가 자동으로 생성됩니다.<br>
         📋 ToDo · 📅 일정 · 🎙️ 회의록 · 🛒 장보기<br>
         💡 아이디어 · 📖 소설 · 📔 일기</p>
+        <p style="font-size:12px;color:#6366f1;background:rgba(99,102,241,0.08);padding:8px 12px;border-radius:8px;margin-bottom:10px">
+          ✅ 기존 DB가 있으면 자동으로 재사용합니다 (데이터 보존)
+        </p>
         <button class="btn btn-primary btn-block" id="setup-init-btn" onclick="MemoNest.initNotion()">
-          <i class="fas fa-magic"></i> 노션 DB 자동 생성 시작
+          <i class="fas fa-magic"></i> 노션 DB 자동 생성 / 기존 DB 연결
+        </button>
+        <button class="btn btn-secondary btn-block" style="margin-top:8px" id="setup-recover-btn" onclick="MemoNest.recoverNotion()">
+          <i class="fas fa-search"></i> 기존 DB ID 자동 복원
         </button>
       </div>
 
@@ -321,6 +327,41 @@ const MemoNest = {
         </div>
       </div>
     </div>`;
+  },
+
+  async recoverNotion() {
+    const pageId = document.getElementById('setup-page-id')?.value?.trim();
+    if (!pageId || pageId.length < 10) {
+      this.toast('노션 페이지 ID를 먼저 입력해주세요', 'error'); return;
+    }
+    const cleanId = pageId.replace(/-/g, '').replace(/.*([a-f0-9]{32}).*/, '$1');
+    const btn = document.getElementById('setup-recover-btn');
+    if (btn) { btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 탐색 중...'; btn.disabled = true; }
+
+    try {
+      const res = await fetch('/api/notion/recover', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ parentPageId: cleanId })
+      });
+      const data = await res.json();
+      if (data.success && data.found === 7) {
+        this.state.dbIds = data.databases;
+        this.save('dbIds', data.databases);
+        this.state.isSetupDone = true;
+        this.toast(`🎉 기존 DB ${data.found}개 복원 완료!`, 'success');
+        this.render();
+      } else if (data.success && data.found > 0) {
+        this.toast(`⚠️ ${data.found}/7개만 찾았어요. "DB 자동 생성" 버튼으로 나머지를 생성해주세요.`, 'info', 5000);
+        if (btn) { btn.innerHTML = '<i class="fas fa-search"></i> 기존 DB ID 자동 복원'; btn.disabled = false; }
+      } else {
+        this.toast('기존 DB를 찾지 못했어요. "DB 자동 생성" 버튼을 사용해주세요.', 'info');
+        if (btn) { btn.innerHTML = '<i class="fas fa-search"></i> 기존 DB ID 자동 복원'; btn.disabled = false; }
+      }
+    } catch (e) {
+      this.toast('복원 실패: ' + e.message, 'error');
+      if (btn) { btn.innerHTML = '<i class="fas fa-search"></i> 기존 DB ID 자동 복원'; btn.disabled = false; }
+    }
   },
 
   async initNotion() {
