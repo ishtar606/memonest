@@ -4,8 +4,9 @@
 const MemoNest = {
   // ── State ──────────────────────────────────────────────────────────────────
   // ── 앱 버전/개발 로그 ─────────────────────────────────────────────────────
-  VERSION: '1.4.3',
+  VERSION: '1.4.4',
   CHANGELOG: [
+    { ver: '1.4.4', date: '2026-09-16', changes: ['DB 복원 시 중복 자동 정리: 빈 중복 DB Notion에서 삭제, 데이터 있는 것은 보존', '복원 결과에 삭제/보존 현황 상세 표시'] },
     { ver: '1.4.3', date: '2026-09-16', changes: ['Notion DB 복원: created_time 정렬로 가장 오래된(원본) DB 확실히 선택', '복원 결과에 중복 세트 수 + 원본 생성 시간 표시'] },
     { ver: '1.4.0', date: '2026-09-16', changes: ['보안: Genspark Identity 인증 적용 (Sign in with Genspark)', 'STT 설정창 추가 (마이크 환경별 가이드)', '사용자 정보 헤더 표시', '기능 전체 자체 검토 및 버그 수정', '개발 로그 정보창 추가'] },
     { ver: '1.3.0', date: '2026-09-16', changes: ['일정: GMT 기준시간 표시 + 단말 타임존 동기화', 'ToDo: 태그 인라인 표시 + 태그별 그룹 필터 기능'] },
@@ -351,17 +352,17 @@ const MemoNest = {
         this.save('dbIds', data.databases);
         this.state.isSetupDone = true;
 
-        // 중복 DB 개수 계산
-        const totalFound = (data.allFound || []).length;
-        const dupCount = totalFound - data.found;
-        // 가장 오래된 DB 생성 시간 (selectedInfo 첫 항목 기준)
+        // 결과 메시지 조합
         const oldestCreated = data.selectedInfo?.[0]?.created
           ? new Date(data.selectedInfo[0].created).toLocaleString('ko-KR', {month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'})
           : '';
+        const deletedCount = data.deleted?.length || 0;
+        const skippedCount = data.skipped?.length || 0;
 
-        let msg = `🎉 기존 DB ${data.found}개 복원 완료!`;
-        if (dupCount > 0) msg += ` (중복 ${dupCount}세트 중 가장 오래된 것 선택)`;
-        if (oldestCreated) msg += ` — 원본 생성: ${oldestCreated}`;
+        let msg = `🎉 DB ${data.found}개 복원 완료!`;
+        if (oldestCreated) msg += ` (원본: ${oldestCreated})`;
+        if (deletedCount > 0) msg += ` · 빈 중복 ${deletedCount}개 자동 삭제`;
+        if (skippedCount > 0) msg += ` · 데이터 있는 중복 ${skippedCount}개 보존`;
 
         this.toast(msg, 'success', 6000);
         this.render();

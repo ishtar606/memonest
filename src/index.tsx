@@ -386,7 +386,7 @@ app.post('/api/notion/init', async (c) => {
   return c.json({ success: true, databases, reused: false, message: `${missing.length}개 DB 생성됨` })
 })
 
-// ─── Notion DB 복원 API (기존 DB ID 자동 탐색) ────────────────────────────────
+// ─── Notion DB 복원 API (기존 DB ID 자동 탐색 + 빈 중복 DB 자동 정리) ──────────
 app.post('/api/notion/recover', async (c) => {
   const { parentPageId } = await c.req.json()
   const apiKey = c.env.NOTION_API_KEY
@@ -404,9 +404,8 @@ app.post('/api/notion/recover', async (c) => {
     '📔 Diary':             'diary',
   }
 
-  // created_time 기준 오름차순 정렬 → 가장 오래된(원본) DB 우선 선택
+  // 1단계: 전체 child_database 수집
   const allFound: Array<{key:string, id:string, title:string, created:string}> = []
-
   for (const block of childrenRes.results) {
     if (block.type === 'child_database') {
       const dbTitle = block.child_database?.title || ''
@@ -417,21 +416,65 @@ app.post('/api/notion/recover', async (c) => {
     }
   }
 
-  // 생성 시간 오름차순 정렬 (가장 오래된 것이 앞으로)
+  // 2단계: created_time 오름차순 정렬 → 가장 오래된(원본) DB가 앞으로
   allFound.sort((a, b) => a.created.localeCompare(b.created))
 
-  // 각 key별 가장 오래된 DB만 선택
+  // 3단계: key별로 그룹화
+  const grouped: Record<string, Array<{key:string, id:string, title:string, created:string}>> = {}
+  for (const item of allFound) {
+    if (!grouped[item.key]) grouped[item.key] = []
+    grouped[item.key].push(item)
+  }
+
+  // 4단계: 중복이 있는 key에 대해 — 원본 제외 나머지의 records 수 확인 후 0건이면 삭제
   const databases: Record<string, string> = {}
   const selectedInfo: Array<{key:string, id:string, title:string, created:string}> = []
-  for (const item of allFound) {
-    if (!databases[item.key]) {
-      databases[item.key] = item.id
-      selectedInfo.push(item)
+  const deleted: Array<{key:string, id:string, title:string, reason:string}> = []
+  const skipped: Array<{key:string, id:string, title:string, reason:string}> = []
+
+  for (const key of Object.keys(grouped)) {
+    const items = grouped[key]
+    // 가장 오래된 것 = 원본 (index 0)
+    databases[key] = items[0].id
+    selectedInfo.push(items[0])
+
+    // 중복이 있을 때만 나머지 검사
+    if (items.length > 1) {
+      for (const dup of items.slice(1)) {
+        try {
+          // records 수 조회 (page_size=1로 최소 요청)
+          const queryRes = await notionRequest(apiKey, `/databases/${dup.id}/query`, 'POST', { page_size: 1 })
+          const recordCount = queryRes.results?.length ?? 0
+          const hasMore = queryRes.has_more ?? false
+          const isEmpty = recordCount === 0 && !hasMore
+
+          if (isEmpty) {
+            // 빈 중복 DB → Notion 아카이브(삭제)
+            await notionRequest(apiKey, `/blocks/${dup.id}`, 'DELETE')
+            deleted.push({ key, id: dup.id, title: dup.title, reason: '빈 중복 DB 자동 삭제' })
+          } else {
+            // 데이터 있는 중복 → 건드리지 않음
+            skipped.push({ key, id: dup.id, title: dup.title, reason: `데이터 ${recordCount}건 이상 있어 보존` })
+          }
+        } catch (_) {
+          // 삭제 실패해도 복원은 계속 진행
+          skipped.push({ key, id: dup.id, title: dup.title, reason: '삭제 시도 실패 (건너뜀)' })
+        }
+      }
     }
   }
 
   const found = Object.keys(databases).length
-  return c.json({ success: true, databases, found, allFound, selectedInfo, message: `${found}개 DB 복원됨 (가장 오래된 DB 선택)` })
+  return c.json({
+    success: true,
+    databases,
+    found,
+    allFound,
+    selectedInfo,
+    deleted,
+    skipped,
+    message: `${found}개 DB 복원됨 | 중복 삭제: ${deleted.length}개 | 보존: ${skipped.length}개`
+  })
 })
 
 
