@@ -4,8 +4,18 @@
 const MemoNest = {
   // ── State ──────────────────────────────────────────────────────────────────
   // ── 앱 버전/개발 로그 ─────────────────────────────────────────────────────
-  VERSION: '2.0.0',
+  VERSION: '2.1.0',
   CHANGELOG: [
+    { ver: '2.1.0', date: '2026-09-16', changes: [
+      'Phase 2.1-a: 일정 수정 기능 (PATCH /api/schedules/:pageId + 인라인 수정 폼)',
+      'Phase 2.1-b: ToDo 반복 태스크 완료 시 다음 날짜 자동 재생성 (매일/매주/매월)',
+      'Phase 2.1-c: 홈 대시보드 — 오늘 일정 미리보기 카드 + ToDo 진행률 카드 (PC/모바일)',
+      'Phase 2.2-a: ToDo AI 우선순위·마감일 자동 추천 버튼 + 결과 UI 연결',
+      'Phase 2.2-b: 일기 저장 시 AI 한줄 요약·무드 자동 생성',
+      'Phase 2.3-a: ToDo 드래그&드롭 순서 변경 + localStorage 영속화',
+      'Phase 2.3-b: 쇼핑 카테고리별 그룹화 뷰 (목록/카테고리 뷰 스위처, 접기/펼치기, 진행률 바)',
+      'Phase 2.3-c: PWA Service Worker 오프라인 캐시 (Cache First + Network First 전략)',
+    ] },
     { ver: '2.0.0', date: '2026-09-16', changes: ['ToDo/일정/쇼핑 항목 삭제 기능 (Notion 아카이브)', 'ToDo 전체 필드 인라인 수정 기능 (제목·상태·우선순위·마감일·메모)', '홈 대시보드 ToDo 미완료·기한초과 카운터 배지 (PC/모바일)', 'Bug Fix: Firefox MediaRecorder mimeType 동적 감지 fallback', 'Bug Fix: stopRecording() 실제 mimeType 사용하도록 수정', 'Bug Fix: PC 홈 settings 카드 showMoreMenu→showSettings 수정'] },
     { ver: '1.4.4', date: '2026-09-16', changes: ['DB 복원 시 중복 자동 정리: 빈 중복 DB Notion에서 삭제, 데이터 있는 것은 보존', '복원 결과에 삭제/보존 현황 상세 표시'] },
     { ver: '1.4.3', date: '2026-09-16', changes: ['Notion DB 복원: created_time 정렬로 가장 오래된(원본) DB 확실히 선택', '복원 결과에 중복 세트 수 + 원본 생성 시간 표시'] },
@@ -586,24 +596,93 @@ const MemoNest = {
   async loadHomeSummary() {
     // 홈 대시보드용 미완료 ToDo 카운트 로드
     const el = document.getElementById('home-todo-badge');
-    if (!el || !this.state.dbIds.todo) return;
-    try {
-      const res = await fetch(`/api/todos?dbId=${this.state.dbIds.todo}`);
-      const data = await res.json();
-      const todos = data.results || [];
-      const undone = todos.filter(t => t.properties['상태']?.select?.name !== '완료').length;
-      const overdue = todos.filter(t => {
-        const d = t.properties['Due Date']?.date?.start;
-        const s = t.properties['상태']?.select?.name;
-        return d && new Date(d) < new Date() && s !== '완료';
-      }).length;
-      if (undone > 0) {
-        el.textContent = undone + '개 미완료' + (overdue > 0 ? ` · ⚠️${overdue}개 기한초과` : '');
-        el.style.display = 'inline-block';
-        el.style.background = overdue > 0 ? '#fee2e2' : 'rgba(99,102,241,0.12)';
-        el.style.color = overdue > 0 ? '#ef4444' : '#6366f1';
+    if (el && this.state.dbIds.todo) {
+      try {
+        const res = await fetch(`/api/todos?dbId=${this.state.dbIds.todo}`);
+        const data = await res.json();
+        const todos = data.results || [];
+        const undone = todos.filter(t => t.properties['상태']?.select?.name !== '완료').length;
+        const overdue = todos.filter(t => {
+          const d = t.properties['Due Date']?.date?.start;
+          const s = t.properties['상태']?.select?.name;
+          return d && new Date(d) < new Date() && s !== '완료';
+        }).length;
+        if (undone > 0) {
+          el.textContent = undone + '개 미완료' + (overdue > 0 ? ` · ⚠️${overdue}개 기한초과` : '');
+          el.style.display = 'inline-block';
+          el.style.background = overdue > 0 ? '#fee2e2' : 'rgba(99,102,241,0.12)';
+          el.style.color = overdue > 0 ? '#ef4444' : '#6366f1';
+        }
+      } catch (_) {}
+    }
+    // 오늘 일정 미리보기 로드
+    const schedEl = document.getElementById('home-schedule-preview');
+    if (schedEl && this.state.dbIds.schedule) {
+      try {
+        const res = await fetch(`/api/schedules?dbId=${this.state.dbIds.schedule}`);
+        const data = await res.json();
+        const results = data.results || [];
+        const todayStr = new Date().toISOString().split('T')[0];
+        const todayItems = results.filter(s => {
+          const dt = s.properties['날짜/시간']?.date?.start || '';
+          return dt.startsWith(todayStr);
+        });
+        const upcomingItems = results.filter(s => {
+          const dt = s.properties['날짜/시간']?.date?.start || '';
+          return dt > new Date().toISOString() && !dt.startsWith(todayStr);
+        }).slice(0, 2);
+        const showItems = [...todayItems, ...upcomingItems].slice(0, 3);
+        if (!showItems.length) {
+          schedEl.innerHTML = `<div style="font-size:12px;color:#94a3b8;text-align:center;padding:8px 0">오늘 예정된 일정이 없어요 😊</div>`;
+        } else {
+          schedEl.innerHTML = showItems.map(s => {
+            const title = s.properties['일정 제목']?.title?.[0]?.text?.content || '';
+            const dtRaw = s.properties['날짜/시간']?.date?.start || '';
+            const dtObj = dtRaw ? new Date(dtRaw) : null;
+            const isToday = dtRaw.startsWith(todayStr);
+            const timeStr = dtObj ? dtObj.toLocaleTimeString('ko-KR', { hour:'2-digit', minute:'2-digit', hour12:false }) : '';
+            const cat = s.properties['카테고리']?.select?.name || '';
+            const catColors = { '회의':'#6366f1', '개인':'#10b981', '이벤트':'#f59e0b', '약속':'#ef4444', '기타':'#94a3b8' };
+            return `<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #f1f5f9">
+              <div style="width:3px;height:32px;border-radius:2px;background:${catColors[cat]||'#6366f1'};flex-shrink:0"></div>
+              <div style="flex:1;min-width:0">
+                <div style="font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${title}</div>
+                <div style="font-size:11px;color:#94a3b8">${isToday ? '오늘' : dtRaw.slice(5,10).replace('-','/')} ${timeStr}</div>
+              </div>
+              ${isToday ? `<span style="font-size:10px;background:#fef3c7;color:#d97706;padding:2px 6px;border-radius:10px;flex-shrink:0">오늘</span>` : ''}
+            </div>`;
+          }).join('');
+        }
+      } catch(_) {
+        schedEl.innerHTML = '';
       }
-    } catch (_) {}
+    }
+    // PC 홈 ToDo 현황 카드 업데이트
+    const todoSumEl = document.getElementById('home-todo-summary');
+    if (todoSumEl && this.state.dbIds.todo) {
+      try {
+        const res = await fetch(`/api/todos?dbId=${this.state.dbIds.todo}`);
+        const data = await res.json();
+        const todos = data.results || [];
+        const total = todos.length;
+        const done = todos.filter(t => t.properties['상태']?.select?.name === '완료').length;
+        const overdue = todos.filter(t => {
+          const d = t.properties['Due Date']?.date?.start;
+          const s = t.properties['상태']?.select?.name;
+          return d && new Date(d) < new Date() && s !== '완료';
+        }).length;
+        const pct = total > 0 ? Math.round(done/total*100) : 0;
+        todoSumEl.innerHTML = `
+          <div style="display:flex;justify-content:space-between;font-size:12px;color:#64748b;margin-bottom:6px">
+            <span>완료 ${done}/${total}</span>
+            <span style="font-weight:700;color:#6366f1">${pct}%</span>
+          </div>
+          <div style="background:#e2e8f0;border-radius:4px;height:6px;overflow:hidden">
+            <div style="width:${pct}%;background:linear-gradient(90deg,#6366f1,#8b5cf6);height:100%;border-radius:4px;transition:width 0.4s"></div>
+          </div>
+          ${overdue > 0 ? `<div style="margin-top:6px;font-size:11px;color:#ef4444;font-weight:600">⚠️ 기한초과 ${overdue}개</div>` : `<div style="margin-top:6px;font-size:11px;color:#10b981">✅ 기한초과 없음</div>`}`;
+      } catch(_) {}
+    }
   },
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -645,6 +724,22 @@ const MemoNest = {
             ${m.id === 'todo' ? `<span id="home-todo-badge" style="display:none;font-size:10px;padding:2px 8px;border-radius:20px;margin-top:4px;font-weight:600"></span>` : ''}
           </div>`).join('')}
       </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px">
+        <div class="card">
+          <div class="card-header" style="margin-bottom:10px">
+            <div class="card-title">📅 오늘의 일정</div>
+            <button onclick="MemoNest.navigate('schedule')" style="font-size:12px;color:#6366f1;background:rgba(99,102,241,0.08);border:none;cursor:pointer;padding:4px 10px;border-radius:20px">전체 보기</button>
+          </div>
+          <div id="home-schedule-preview"><div style="font-size:12px;color:#94a3b8;text-align:center;padding:8px 0">로딩 중...</div></div>
+        </div>
+        <div class="card">
+          <div class="card-header" style="margin-bottom:10px">
+            <div class="card-title">📋 ToDo 현황</div>
+            <button onclick="MemoNest.navigate('todo')" style="font-size:12px;color:#6366f1;background:rgba(99,102,241,0.08);border:none;cursor:pointer;padding:4px 10px;border-radius:20px">전체 보기</button>
+          </div>
+          <div id="home-todo-summary" style="font-size:12px;color:#94a3b8;text-align:center;padding:8px 0">로딩 중...</div>
+        </div>
+      </div>
       <div class="card" style="margin-top:8px">
         <div class="card-header">
           <div class="card-title">💡 MemoNest 사용 가이드</div>
@@ -682,6 +777,13 @@ const MemoNest = {
           <div class="count">${m.desc}</div>
           ${m.id === 'todo' ? `<span id="home-todo-badge" style="display:none;font-size:10px;padding:2px 8px;border-radius:20px;margin-top:4px;font-weight:600"></span>` : ''}
         </div>`).join('')}
+    </div>
+    <div class="card" style="margin-bottom:12px">
+      <div class="card-header" style="margin-bottom:10px">
+        <div class="card-title" style="font-size:14px">📅 오늘의 일정</div>
+        <button onclick="MemoNest.navigate('schedule')" style="font-size:11px;color:#6366f1;background:rgba(99,102,241,0.08);border:none;cursor:pointer;padding:3px 8px;border-radius:20px">전체</button>
+      </div>
+      <div id="home-schedule-preview"><div style="font-size:12px;color:#94a3b8;text-align:center;padding:4px 0">로딩 중...</div></div>
     </div>
     <div style="padding:12px 14px;background:#f8fafc;border-radius:12px;border:1px solid #e2e8f0;display:flex;align-items:center;justify-content:space-between;gap:8px">
       <div style="font-size:11px;color:#94a3b8">
@@ -753,6 +855,18 @@ const MemoNest = {
     if (!todos.length) {
       el.innerHTML = `<div class="empty-state"><span class="emoji">📋</span><p>할 일이 없어요!<br>+ 버튼으로 추가해보세요</p></div>`; return;
     }
+    // localStorage 순서 적용
+    const orderKey = `todoOrder_${this.state.dbIds.todo}`;
+    const savedOrder = this.load(orderKey, []);
+    if (savedOrder.length) {
+      const orderMap = {};
+      savedOrder.forEach((id, i) => orderMap[id] = i);
+      todos = [...todos].sort((a, b) => {
+        const ia = orderMap[a.id] ?? 9999;
+        const ib = orderMap[b.id] ?? 9999;
+        return ia - ib;
+      });
+    }
     el.innerHTML = todos.map(todo => {
       const props = todo.properties;
       const title = props['할 일']?.title?.[0]?.text?.content || '제목 없음';
@@ -761,18 +875,25 @@ const MemoNest = {
       const dueDate = props['Due Date']?.date?.start;
       const tags = props['태그']?.multi_select || [];
       const memo = props['메모']?.rich_text?.[0]?.text?.content || '';
+      const repeat = props['반복']?.select?.name || '';
       const isDone = status === '완료';
       const isOverdue = dueDate && new Date(dueDate) < new Date() && !isDone;
       const priorityClass = priority.includes('높음') ? 'priority-high' : priority.includes('낮음') ? 'priority-low' : 'priority-mid';
 
       return `
-      <div class="todo-item ${isDone ? 'done' : ''}" style="position:relative">
+      <div class="todo-item ${isDone ? 'done' : ''}" style="position:relative" 
+           draggable="true" data-id="${todo.id}"
+           ondragstart="MemoNest.onDragStart(event)"
+           ondragover="MemoNest.onDragOver(event)"
+           ondrop="MemoNest.onDrop(event)"
+           ondragend="MemoNest.onDragEnd(event)">
+        <div style="cursor:grab;padding:0 6px 0 0;color:#cbd5e1;font-size:14px;flex-shrink:0">⠿</div>
         <div class="todo-checkbox ${isDone ? 'checked' : ''}"
           onclick="MemoNest.toggleTodo('${todo.id}', '${isDone ? '미완료' : '완료'}')">
           ${isDone ? '<i class="fas fa-check" style="font-size:12px"></i>' : ''}
         </div>
         <div class="todo-content" style="flex:1;min-width:0">
-          <div class="todo-title">${title}</div>
+          <div class="todo-title">${title}${repeat && repeat !== '없음' ? ` <span style="font-size:10px;color:#6366f1;background:rgba(99,102,241,0.1);padding:1px 5px;border-radius:8px">🔁${repeat}</span>` : ''}</div>
           <div class="todo-meta">
             ${priority ? `<span class="priority-badge ${priorityClass}">${priority}</span>` : ''}
             ${dueDate ? `<span class="todo-due ${isOverdue ? 'overdue' : ''}">
@@ -794,6 +915,50 @@ const MemoNest = {
         </div>
       </div>`;
     }).join('');
+  },
+
+  // ── Drag & Drop 핸들러 ─────────────────────────────────────────────────────
+  _dragSrcId: null,
+
+  onDragStart(e) {
+    this._dragSrcId = e.currentTarget.dataset.id;
+    e.currentTarget.style.opacity = '0.4';
+    e.dataTransfer.effectAllowed = 'move';
+  },
+
+  onDragOver(e) {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    e.currentTarget.style.borderTop = '2px solid #6366f1';
+  },
+
+  onDrop(e) {
+    e.preventDefault();
+    const targetId = e.currentTarget.dataset.id;
+    e.currentTarget.style.borderTop = '';
+    if (!this._dragSrcId || this._dragSrcId === targetId) return;
+
+    // 현재 렌더된 순서에서 ID 목록 추출
+    const items = [...document.querySelectorAll('#todo-list [data-id]')];
+    const ids = items.map(el => el.dataset.id);
+    const srcIdx = ids.indexOf(this._dragSrcId);
+    const tgtIdx = ids.indexOf(targetId);
+    if (srcIdx === -1 || tgtIdx === -1) return;
+    ids.splice(srcIdx, 1);
+    ids.splice(tgtIdx, 0, this._dragSrcId);
+
+    // 순서 저장
+    const orderKey = `todoOrder_${this.state.dbIds.todo}`;
+    this.save(orderKey, ids);
+
+    // 재렌더 (상태 todos를 그대로 사용, 정렬만 바꿈)
+    this.renderTodoList(this.state.todos);
+  },
+
+  onDragEnd(e) {
+    e.currentTarget.style.opacity = '';
+    e.currentTarget.style.borderTop = '';
+    this._dragSrcId = null;
   },
 
   filterTodos(filter, btn) {
@@ -891,9 +1056,46 @@ const MemoNest = {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status: newStatus })
       });
+      // 반복 태스크: 완료 처리 시 다음 Due Date로 새 항목 자동 생성
+      if (newStatus === '완료') {
+        const todo = this.state.todos.find(t => t.id === pageId);
+        if (todo) {
+          const repeat = todo.properties['반복']?.select?.name;
+          const dueDate = todo.properties['Due Date']?.date?.start;
+          if (repeat && repeat !== '없음' && dueDate) {
+            const nextDate = this.calcNextRepeatDate(dueDate, repeat);
+            if (nextDate) {
+              await fetch('/api/todos', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  dbId: this.state.dbIds.todo,
+                  title: todo.properties['할 일']?.title?.[0]?.text?.content || '',
+                  dueDate: nextDate,
+                  priority: todo.properties['우선순위']?.select?.name || '중간 🟡',
+                  repeat,
+                  memo: todo.properties['메모']?.rich_text?.[0]?.text?.content || '',
+                  tags: (todo.properties['태그']?.multi_select || []).map(t => t.name),
+                })
+              });
+              this.toast(`🔁 반복 태스크 자동 생성 (${nextDate})`, 'info', 4000);
+            }
+          }
+        }
+      }
       this.toast(newStatus === '완료' ? '✅ 완료!' : '↩️ 미완료로 변경', 'success');
       this.loadTodos();
     } catch (e) { this.toast('업데이트 실패', 'error'); }
+  },
+
+  calcNextRepeatDate(dateStr, repeat) {
+    try {
+      const d = new Date(dateStr);
+      if (repeat === '매일') d.setDate(d.getDate() + 1);
+      else if (repeat === '매주') d.setDate(d.getDate() + 7);
+      else if (repeat === '매월') d.setMonth(d.getMonth() + 1);
+      else return null;
+      return d.toISOString().split('T')[0];
+    } catch(e) { return null; }
   },
 
   async deleteTodo(pageId) {
@@ -1005,9 +1207,52 @@ const MemoNest = {
         <label class="form-label">메모</label>
         <textarea class="form-textarea" id="todo-memo" placeholder="추가 메모" style="min-height:60px"></textarea>
       </div>
+      <button class="btn btn-secondary btn-block" style="margin-bottom:8px" onclick="MemoNest.aiAnalyzeTodo()">
+        <i class="fas fa-magic"></i> AI 우선순위·마감일 추천
+      </button>
+      <div id="todo-ai-result" style="display:none;margin-bottom:10px"></div>
       <button class="btn btn-primary btn-block" onclick="MemoNest.saveTodo()">
         <i class="fas fa-save"></i> 저장하기
       </button>`);
+  },
+
+  async aiAnalyzeTodo() {
+    const titleEl = document.getElementById('todo-title');
+    const text = titleEl?.value?.trim();
+    if (!text) { this.toast('할 일을 먼저 입력해주세요', 'error'); return; }
+    const aiBtn = document.querySelector('#app-modal .btn-secondary');
+    if (aiBtn) { aiBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> AI 분석 중...'; aiBtn.disabled = true; }
+    try {
+      const res = await fetch('/api/ai/structure', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'todo', text })
+      });
+      const data = await res.json();
+      if (data.priority) {
+        const prioEl = document.getElementById('todo-priority');
+        if (prioEl) prioEl.value = data.priority;
+      }
+      if (data.suggested_due) {
+        const dueEl = document.getElementById('todo-due');
+        if (dueEl) dueEl.value = data.suggested_due;
+      }
+      if (data.memo) {
+        const memoEl = document.getElementById('todo-memo');
+        if (memoEl && !memoEl.value) memoEl.value = data.memo;
+      }
+      const resultEl = document.getElementById('todo-ai-result');
+      if (resultEl) {
+        resultEl.style.display = 'block';
+        resultEl.innerHTML = `<div class="ai-card"><div class="ai-label">🤖 AI 추천</div><div class="ai-content">
+          우선순위: <strong>${data.priority || '-'}</strong> · 마감일: <strong>${data.suggested_due || '-'}</strong>
+          ${data.memo ? `<br><span style="font-size:11px;color:#64748b">${data.memo}</span>` : ''}
+        </div></div>`;
+      }
+      this.toast('✨ AI 추천이 적용됐어요!', 'success');
+    } catch(e) { this.toast('AI 분석 실패', 'error'); }
+    finally {
+      if (aiBtn) { aiBtn.innerHTML = '<i class="fas fa-magic"></i> AI 우선순위·마감일 추천'; aiBtn.disabled = false; }
+    }
   },
 
   async saveTodo() {
@@ -1365,12 +1610,34 @@ const MemoNest = {
     if (btn) { btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 저장 중...'; btn.disabled = true; }
 
     try {
+      // AI 한줄 요약 + 무드 자동 생성 (내용이 있을 때)
+      let aiSummary = title;
+      let aiMood = mood;
+      if (content && content.length > 10) {
+        try {
+          if (btn) btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> AI 분석 중...';
+          const aiRes = await fetch('/api/ai/structure', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ type: 'diary', text: content })
+          });
+          const aiData = await aiRes.json();
+          if (aiData.summary && !title) aiSummary = aiData.summary;
+          if (aiData.mood && !mood) aiMood = aiData.mood;
+        } catch(_) {}
+        if (btn) btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 노션 저장 중...';
+      }
+
       await fetch('/api/diary', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ dbId: this.state.dbIds.diary, type, date, title: title || `${date} ${type}`, content, mood, weather, summary: title })
+        body: JSON.stringify({
+          dbId: this.state.dbIds.diary, type, date,
+          title: title || aiSummary || `${date} ${type}`,
+          content, mood: aiMood, weather,
+          summary: aiSummary || title
+        })
       });
       document.getElementById('app-modal')?.remove();
-      this.toast('📔 일기가 노션에 저장됐어요!', 'success');
+      this.toast('📔 일기가 노션에 저장됐어요!' + (aiSummary && !title ? ` AI 요약: "${aiSummary}"` : ''), 'success', 4000);
       this.loadDiary(type);
     } catch (e) { this.toast('저장 실패', 'error'); }
   },
@@ -1563,8 +1830,66 @@ const MemoNest = {
   // SHOPPING LIST
   // ══════════════════════════════════════════════════════════════════════════
   renderShopping() {
+    // 뷰 모드: 'list'(기본) | 'group'(카테고리별 그룹화)
+    const viewMode = this.load('shoppingViewMode', 'list');
     return `
+    <div style="display:flex;align-items:center;justify-content:flex-end;gap:6px;margin-bottom:10px">
+      <span style="font-size:12px;color:#6b7280">뷰:</span>
+      <button id="shop-view-list" onclick="MemoNest.setShoppingView('list')"
+        class="btn btn-sm ${viewMode === 'list' ? 'btn-primary' : 'btn-secondary'}"
+        style="padding:4px 10px;font-size:12px">
+        <i class="fas fa-list"></i> 목록
+      </button>
+      <button id="shop-view-group" onclick="MemoNest.setShoppingView('group')"
+        class="btn btn-sm ${viewMode === 'group' ? 'btn-primary' : 'btn-secondary'}"
+        style="padding:4px 10px;font-size:12px">
+        <i class="fas fa-layer-group"></i> 카테고리
+      </button>
+    </div>
     <div id="shopping-list"><div class="loading"><div class="spinner"></div></div></div>`;
+  },
+
+  setShoppingView(mode) {
+    this.save('shoppingViewMode', mode);
+    // 뷰 버튼 스타일 업데이트
+    const listBtn = document.getElementById('shop-view-list');
+    const groupBtn = document.getElementById('shop-view-group');
+    if (listBtn) {
+      listBtn.className = `btn btn-sm ${mode === 'list' ? 'btn-primary' : 'btn-secondary'}`;
+      listBtn.style.cssText = 'padding:4px 10px;font-size:12px';
+    }
+    if (groupBtn) {
+      groupBtn.className = `btn btn-sm ${mode === 'group' ? 'btn-primary' : 'btn-secondary'}`;
+      groupBtn.style.cssText = 'padding:4px 10px;font-size:12px';
+    }
+    this.loadShopping();
+  },
+
+  _renderShoppingItem(item) {
+    const props = item.properties;
+    const name = props['아이템']?.title?.[0]?.text?.content || '아이템';
+    const rec = props['구매처 추천']?.rich_text?.[0]?.text?.content || '';
+    const bought = props['구매완료']?.checkbox || false;
+    const country = props['국가']?.select?.name || '';
+    const catEmojis = { '식품': '🥦', '생활용품': '🧴', '가전': '📱', '의류': '👕', '기타': '🛍️' };
+    const cat = props['카테고리']?.select?.name || '기타';
+    return `
+    <div class="shopping-item ${bought ? 'bought' : ''}">
+      <span class="item-emoji">${catEmojis[cat] || '🛍️'}</span>
+      <div class="item-info" style="flex:1">
+        <div class="item-name">${name}</div>
+        ${rec ? `<div class="item-rec">${rec.slice(0, 80)}${rec.length > 80 ? '...' : ''}</div>` : ''}
+        ${country ? `<span class="tag" style="margin-top:4px;font-size:10px">${country}</span>` : ''}
+      </div>
+      <button class="btn btn-sm ${bought ? 'btn-secondary' : 'btn-success'}" style="flex-shrink:0"
+        onclick="MemoNest.toggleShopping('${item.id}', ${!bought})">
+        ${bought ? '↩️' : '✅'}
+      </button>
+      <button onclick="MemoNest.deleteShopping('${item.id}')"
+        style="background:none;border:1px solid #fee2e2;border-radius:6px;padding:4px 8px;cursor:pointer;font-size:11px;color:#ef4444;flex-shrink:0;margin-left:4px" title="삭제">
+        <i class="fas fa-trash"></i>
+      </button>
+    </div>`;
   },
 
   async loadShopping() {
@@ -1574,34 +1899,88 @@ const MemoNest = {
       const res = await fetch(`/api/shopping?dbId=${this.state.dbIds.shopping}`);
       const data = await res.json();
       const results = data.results || [];
-      if (!results.length) { el.innerHTML = '<div class="empty-state"><span class="emoji">🛒</span><p>장보기 목록이 비어있어요!<br>+ 버튼으로 추가해보세요</p></div>'; return; }
-      el.innerHTML = results.map(item => {
-        const props = item.properties;
-        const name = props['아이템']?.title?.[0]?.text?.content || '아이템';
-        const rec = props['구매처 추천']?.rich_text?.[0]?.text?.content || '';
-        const bought = props['구매완료']?.checkbox || false;
-        const country = props['국가']?.select?.name || '';
+      if (!results.length) {
+        el.innerHTML = '<div class="empty-state"><span class="emoji">🛒</span><p>장보기 목록이 비어있어요!<br>+ 버튼으로 추가해보세요</p></div>';
+        return;
+      }
+
+      const viewMode = this.load('shoppingViewMode', 'list');
+
+      if (viewMode === 'group') {
+        // ── 카테고리별 그룹화 뷰 ────────────────────────────────────────
+        const catOrder = ['식품', '생활용품', '가전', '의류', '기타'];
         const catEmojis = { '식품': '🥦', '생활용품': '🧴', '가전': '📱', '의류': '👕', '기타': '🛍️' };
-        const cat = props['카테고리']?.select?.name || '기타';
-        return `
-        <div class="shopping-item ${bought ? 'bought' : ''}">
-          <span class="item-emoji">${catEmojis[cat] || '🛍️'}</span>
-          <div class="item-info" style="flex:1">
-            <div class="item-name">${name}</div>
-            ${rec ? `<div class="item-rec">${rec.slice(0, 80)}${rec.length > 80 ? '...' : ''}</div>` : ''}
-            ${country ? `<span class="tag" style="margin-top:4px;font-size:10px">${country}</span>` : ''}
+        // 그룹 맵 생성
+        const groups = {};
+        catOrder.forEach(c => { groups[c] = []; });
+        results.forEach(item => {
+          const cat = item.properties['카테고리']?.select?.name || '기타';
+          if (!groups[cat]) groups[cat] = [];
+          groups[cat].push(item);
+        });
+
+        // 빈 그룹 제외, 항목 있는 카테고리만 렌더
+        const html = catOrder.filter(cat => groups[cat].length > 0).map(cat => {
+          const items = groups[cat];
+          const total = items.length;
+          const done = items.filter(i => i.properties['구매완료']?.checkbox).length;
+          const allDone = done === total;
+          // 접기/펼치기 상태: 기본 펼침 (미구매 있으면 펼침)
+          const collapseKey = `shopCat_${cat}_collapsed`;
+          const isCollapsed = this.load(collapseKey, false);
+          return `
+          <div class="shopping-group" style="margin-bottom:12px;border:1px solid ${allDone ? '#d1fae5' : '#e5e7eb'};border-radius:10px;overflow:hidden">
+            <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:${allDone ? '#f0fdf4' : '#f9fafb'};cursor:pointer"
+              onclick="MemoNest.toggleShoppingGroup('${cat}')">
+              <div style="display:flex;align-items:center;gap:8px">
+                <span style="font-size:18px">${catEmojis[cat] || '🛍️'}</span>
+                <span style="font-weight:600;font-size:14px;color:#374151">${cat}</span>
+                <span style="font-size:12px;color:#6b7280;background:#e5e7eb;border-radius:10px;padding:1px 7px">${done}/${total}</span>
+                ${allDone ? '<span style="font-size:11px;color:#10b981;font-weight:600">✓ 완료</span>' : ''}
+              </div>
+              <i class="fas fa-chevron-${isCollapsed ? 'down' : 'up'}" style="color:#9ca3af;font-size:12px"></i>
+            </div>
+            <div id="shop-group-${cat}" style="display:${isCollapsed ? 'none' : 'block'};padding:0 8px 8px">
+              ${items.map(item => this._renderShoppingItem(item)).join('')}
+            </div>
+          </div>`;
+        }).join('');
+
+        // 하단 진행 요약
+        const totalAll = results.length;
+        const doneAll = results.filter(i => i.properties['구매완료']?.checkbox).length;
+        const pct = Math.round(doneAll / totalAll * 100);
+        el.innerHTML = html + `
+        <div style="margin-top:8px;padding:10px 14px;background:#f8fafc;border-radius:8px;border:1px solid #e5e7eb">
+          <div style="display:flex;justify-content:space-between;font-size:12px;color:#6b7280;margin-bottom:6px">
+            <span>전체 진행률</span><span>${doneAll}/${totalAll} 완료 (${pct}%)</span>
           </div>
-          <button class="btn btn-sm ${bought ? 'btn-secondary' : 'btn-success'}" style="flex-shrink:0"
-            onclick="MemoNest.toggleShopping('${item.id}', ${!bought})">
-            ${bought ? '↩️' : '✅'}
-          </button>
-          <button onclick="MemoNest.deleteShopping('${item.id}')"
-            style="background:none;border:1px solid #fee2e2;border-radius:6px;padding:4px 8px;cursor:pointer;font-size:11px;color:#ef4444;flex-shrink:0;margin-left:4px" title="삭제">
-            <i class="fas fa-trash"></i>
-          </button>
+          <div style="background:#e5e7eb;border-radius:4px;height:6px;overflow:hidden">
+            <div style="background:${pct === 100 ? '#10b981' : '#6366f1'};width:${pct}%;height:100%;border-radius:4px;transition:width 0.4s"></div>
+          </div>
         </div>`;
-      }).join('');
+      } else {
+        // ── 기본 목록 뷰 ─────────────────────────────────────────────────
+        el.innerHTML = results.map(item => this._renderShoppingItem(item)).join('');
+      }
     } catch (e) { el.innerHTML = '<p style="color:#ef4444;text-align:center;padding:20px">로드 실패</p>'; }
+  },
+
+  toggleShoppingGroup(cat) {
+    const key = `shopCat_${cat}_collapsed`;
+    const isCollapsed = this.load(key, false);
+    this.save(key, !isCollapsed);
+    const el = document.getElementById(`shop-group-${cat}`);
+    if (el) el.style.display = !isCollapsed ? 'none' : 'block';
+    // 화살표 아이콘 토글
+    const header = el?.previousElementSibling;
+    if (header) {
+      const icon = header.querySelector('i.fa-chevron-up, i.fa-chevron-down');
+      if (icon) {
+        icon.className = `fas fa-chevron-${!isCollapsed ? 'down' : 'up'}`;
+        icon.style.cssText = 'color:#9ca3af;font-size:12px';
+      }
+    }
   },
 
   async toggleShopping(pageId, checked) {
@@ -1750,8 +2129,12 @@ const MemoNest = {
         <div class="card" style="border-color:${borderColor}">
           <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px">
             <div style="font-size:15px;font-weight:600;flex:1;min-width:0">📅 ${title}</div>
-            <div style="display:flex;align-items:center;gap:6px;flex-shrink:0">
+            <div style="display:flex;align-items:center;gap:4px;flex-shrink:0">
               ${badge}
+              <button onclick="MemoNest.showEditSchedule('${s.id}','${title.replace(/'/g,"&apos;")}','${datetimeRaw}','${location.replace(/'/g,"&apos;")}','${category}','${reminder}','${(props['메모']?.rich_text?.[0]?.text?.content||'').replace(/'/g,"&apos;")}')" 
+                style="background:none;border:1px solid #e2e8f0;border-radius:6px;padding:3px 7px;cursor:pointer;font-size:11px;color:#64748b" title="수정">
+                <i class="fas fa-pen"></i>
+              </button>
               <button onclick="MemoNest.deleteSchedule('${s.id}')" 
                 style="background:none;border:1px solid #fee2e2;border-radius:6px;padding:3px 7px;cursor:pointer;font-size:11px;color:#ef4444" title="삭제">
                 <i class="fas fa-trash"></i>
@@ -1769,6 +2152,82 @@ const MemoNest = {
         </div>`;
       }).join('');
     } catch (e) { el.innerHTML = '<p style="color:#ef4444;text-align:center;padding:20px">로드 실패</p>'; }
+  },
+
+  showEditSchedule(pageId, title, datetimeRaw, location, category, reminder, memo) {
+    // datetimeRaw → datetime-local 형식으로 변환
+    let localVal = '';
+    if (datetimeRaw) {
+      try {
+        const dt = new Date(datetimeRaw);
+        const pad = n => String(n).padStart(2,'0');
+        localVal = `${dt.getFullYear()}-${pad(dt.getMonth()+1)}-${pad(dt.getDate())}T${pad(dt.getHours())}:${pad(dt.getMinutes())}`;
+      } catch(e) { localVal = datetimeRaw.slice(0,16); }
+    }
+    const gmtStr = this.getGMTOffsetStr();
+    this.showModal('✏️ 일정 수정', `
+      <div class="form-group">
+        <label class="form-label">일정 제목 *</label>
+        <input class="form-input" id="edit-sch-title" value="${title}">
+      </div>
+      <div class="form-group">
+        <label class="form-label">날짜/시간 <span style="font-size:11px;color:var(--primary);margin-left:4px">${gmtStr}</span></label>
+        <input class="form-input" type="datetime-local" id="edit-sch-datetime" value="${localVal}">
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        <div class="form-group">
+          <label class="form-label">카테고리</label>
+          <select class="form-select" id="edit-sch-category">
+            ${['회의','개인','이벤트','약속','기타'].map(c => `<option value="${c}" ${category===c?'selected':''}>${c}</option>`).join('')}
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">알림</label>
+          <select class="form-select" id="edit-sch-reminder">
+            ${['없음','10분 전','1시간 전','1일 전'].map(r => `<option value="${r}" ${reminder===r?'selected':''}>${r}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">장소</label>
+        <input class="form-input" id="edit-sch-location" value="${location}">
+      </div>
+      <div class="form-group">
+        <label class="form-label">메모</label>
+        <textarea class="form-textarea" id="edit-sch-memo" style="min-height:60px">${memo}</textarea>
+      </div>
+      <button class="btn btn-primary btn-block" onclick="MemoNest.saveEditSchedule('${pageId}')">
+        <i class="fas fa-save"></i> 수정 저장
+      </button>`, null);
+  },
+
+  async saveEditSchedule(pageId) {
+    const btn = document.querySelector('#app-modal .btn-primary');
+    if (btn) { btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 저장 중...'; btn.disabled = true; }
+    const datetimeVal = document.getElementById('edit-sch-datetime')?.value;
+    let datetimeISO = datetimeVal;
+    if (datetimeVal) {
+      const offset = -new Date().getTimezoneOffset();
+      const sign = offset >= 0 ? '+' : '-';
+      const h = Math.floor(Math.abs(offset)/60), m = Math.abs(offset)%60;
+      datetimeISO = `${datetimeVal}:00${sign}${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`;
+    }
+    try {
+      await fetch(`/api/schedules/${pageId}`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: document.getElementById('edit-sch-title')?.value,
+          datetime: datetimeISO,
+          location: document.getElementById('edit-sch-location')?.value || '',
+          category: document.getElementById('edit-sch-category')?.value,
+          reminder: document.getElementById('edit-sch-reminder')?.value,
+          memo: document.getElementById('edit-sch-memo')?.value || '',
+        })
+      });
+      document.getElementById('app-modal')?.remove();
+      this.toast('✅ 일정이 수정됐어요!', 'success');
+      this.loadSchedules();
+    } catch(e) { this.toast('수정 실패', 'error'); }
   },
 
   async deleteSchedule(pageId) {

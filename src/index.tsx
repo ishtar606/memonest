@@ -810,6 +810,22 @@ app.delete('/api/shopping/:pageId', async (c) => {
   return c.json(data)
 })
 
+// 일정 수정
+app.patch('/api/schedules/:pageId', async (c) => {
+  const apiKey = c.env.NOTION_API_KEY
+  const pageId = c.req.param('pageId')
+  const body = await c.req.json()
+  const properties: any = {}
+  if (body.title) properties['일정 제목'] = { title: [{ text: { content: body.title } }] }
+  if (body.datetime) properties['날짜/시간'] = { date: { start: body.datetime } }
+  if (body.location !== undefined) properties['장소'] = { rich_text: body.location ? [{ text: { content: body.location } }] : [] }
+  if (body.category) properties['카테고리'] = { select: { name: body.category } }
+  if (body.reminder) properties['알림'] = { select: { name: body.reminder } }
+  if (body.memo !== undefined) properties['메모'] = { rich_text: body.memo ? [{ text: { content: body.memo } }] : [] }
+  const data = await notionRequest(apiKey, `/pages/${pageId}`, 'PATCH', { properties })
+  return c.json(data)
+})
+
 // 일정 삭제
 app.delete('/api/schedules/:pageId', async (c) => {
   const apiKey = c.env.NOTION_API_KEY
@@ -987,6 +1003,30 @@ app.get('*', (c) => {
 <body class="bg-gray-50 min-h-screen">
   <div id="app"></div>
   <script src="/static/app.js"></script>
+  <script>
+    // PWA Service Worker 등록
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('/static/sw.js', { scope: '/' })
+          .then(reg => {
+            // 새 버전 감지 시 사용자에게 알림
+            reg.onupdatefound = () => {
+              const newSW = reg.installing;
+              if (newSW) {
+                newSW.onstatechange = () => {
+                  if (newSW.state === 'installed' && navigator.serviceWorker.controller) {
+                    if (window.MemoNest?.toast) {
+                      MemoNest.toast('🔄 새 버전이 있어요! 새로고침하면 적용돼요.', 'info', 5000);
+                    }
+                  }
+                };
+              }
+            };
+          })
+          .catch(() => {}); // 등록 실패는 조용히 무시 (선택적 기능)
+      });
+    }
+  </script>
 </body>
 </html>`)
 })
