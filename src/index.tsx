@@ -514,13 +514,24 @@ app.post('/api/todos', async (c) => {
 app.patch('/api/todos/:pageId', async (c) => {
   const apiKey = c.env.NOTION_API_KEY
   const pageId = c.req.param('pageId')
-  const { status } = await c.req.json()
+  const body = await c.req.json()
 
-  const data = await notionRequest(apiKey, `/pages/${pageId}`, 'PATCH', {
-    properties: {
-      '상태': { select: { name: status } }
-    }
-  })
+  const properties: any = {}
+  if (body.status) properties['상태'] = { select: { name: body.status } }
+  if (body.title) properties['할 일'] = { title: [{ text: { content: body.title } }] }
+  if (body.priority) properties['우선순위'] = { select: { name: body.priority } }
+  if (body.dueDate !== undefined) properties['Due Date'] = body.dueDate ? { date: { start: body.dueDate } } : { date: null }
+  if (body.memo !== undefined) properties['메모'] = { rich_text: body.memo ? [{ text: { content: body.memo } }] : [] }
+
+  const data = await notionRequest(apiKey, `/pages/${pageId}`, 'PATCH', { properties })
+  return c.json(data)
+})
+
+// ToDo 삭제 (Notion 아카이브)
+app.delete('/api/todos/:pageId', async (c) => {
+  const apiKey = c.env.NOTION_API_KEY
+  const pageId = c.req.param('pageId')
+  const data = await notionRequest(apiKey, `/pages/${pageId}`, 'PATCH', { archived: true })
   return c.json(data)
 })
 
@@ -788,6 +799,22 @@ app.patch('/api/shopping/:pageId', async (c) => {
   const data = await notionRequest(apiKey, `/pages/${pageId}`, 'PATCH', {
     properties: { '구매완료': { checkbox: checked } }
   })
+  return c.json(data)
+})
+
+// 쇼핑 삭제
+app.delete('/api/shopping/:pageId', async (c) => {
+  const apiKey = c.env.NOTION_API_KEY
+  const pageId = c.req.param('pageId')
+  const data = await notionRequest(apiKey, `/pages/${pageId}`, 'PATCH', { archived: true })
+  return c.json(data)
+})
+
+// 일정 삭제
+app.delete('/api/schedules/:pageId', async (c) => {
+  const apiKey = c.env.NOTION_API_KEY
+  const pageId = c.req.param('pageId')
+  const data = await notionRequest(apiKey, `/pages/${pageId}`, 'PATCH', { archived: true })
   return c.json(data)
 })
 

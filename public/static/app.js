@@ -4,8 +4,9 @@
 const MemoNest = {
   // ── State ──────────────────────────────────────────────────────────────────
   // ── 앱 버전/개발 로그 ─────────────────────────────────────────────────────
-  VERSION: '1.4.4',
+  VERSION: '2.0.0',
   CHANGELOG: [
+    { ver: '2.0.0', date: '2026-09-16', changes: ['ToDo/일정/쇼핑 항목 삭제 기능 (Notion 아카이브)', 'ToDo 전체 필드 인라인 수정 기능 (제목·상태·우선순위·마감일·메모)', '홈 대시보드 ToDo 미완료·기한초과 카운터 배지 (PC/모바일)', 'Bug Fix: Firefox MediaRecorder mimeType 동적 감지 fallback', 'Bug Fix: stopRecording() 실제 mimeType 사용하도록 수정', 'Bug Fix: PC 홈 settings 카드 showMoreMenu→showSettings 수정'] },
     { ver: '1.4.4', date: '2026-09-16', changes: ['DB 복원 시 중복 자동 정리: 빈 중복 DB Notion에서 삭제, 데이터 있는 것은 보존', '복원 결과에 삭제/보존 현황 상세 표시'] },
     { ver: '1.4.3', date: '2026-09-16', changes: ['Notion DB 복원: created_time 정렬로 가장 오래된(원본) DB 확실히 선택', '복원 결과에 중복 세트 수 + 원본 생성 시간 표시'] },
     { ver: '1.4.0', date: '2026-09-16', changes: ['보안: Genspark Identity 인증 적용 (Sign in with Genspark)', 'STT 설정창 추가 (마이크 환경별 가이드)', '사용자 정보 헤더 표시', '기능 전체 자체 검토 및 버그 수정', '개발 로그 정보창 추가'] },
@@ -571,6 +572,7 @@ const MemoNest = {
 
   afterRender(module) {
     switch (module) {
+      case 'home': this.loadHomeSummary(); break;
       case 'todo': this.loadTodos(); break;
       case 'schedule': this.loadSchedules(); break;
       case 'meeting': this.loadMeetings(); break;
@@ -579,6 +581,29 @@ const MemoNest = {
       case 'novel': this.loadNovels(); break;
       case 'diary': this.loadDiary(); break;
     }
+  },
+
+  async loadHomeSummary() {
+    // 홈 대시보드용 미완료 ToDo 카운트 로드
+    const el = document.getElementById('home-todo-badge');
+    if (!el || !this.state.dbIds.todo) return;
+    try {
+      const res = await fetch(`/api/todos?dbId=${this.state.dbIds.todo}`);
+      const data = await res.json();
+      const todos = data.results || [];
+      const undone = todos.filter(t => t.properties['상태']?.select?.name !== '완료').length;
+      const overdue = todos.filter(t => {
+        const d = t.properties['Due Date']?.date?.start;
+        const s = t.properties['상태']?.select?.name;
+        return d && new Date(d) < new Date() && s !== '완료';
+      }).length;
+      if (undone > 0) {
+        el.textContent = undone + '개 미완료' + (overdue > 0 ? ` · ⚠️${overdue}개 기한초과` : '');
+        el.style.display = 'inline-block';
+        el.style.background = overdue > 0 ? '#fee2e2' : 'rgba(99,102,241,0.12)';
+        el.style.color = overdue > 0 ? '#ef4444' : '#6366f1';
+      }
+    } catch (_) {}
   },
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -613,10 +638,11 @@ const MemoNest = {
       <div style="font-size:13px;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:14px">빠른 실행</div>
       <div class="pc-module-grid">
         ${modules.map(m => `
-          <div class="module-card" onclick="${m.id === 'settings' ? 'MemoNest.showMoreMenu()' : `MemoNest.navigate('${m.id}')`}">
+          <div class="module-card" onclick="${m.id === 'settings' ? 'MemoNest.showSettings()' : `MemoNest.navigate('${m.id}')`}">
             <span class="icon">${m.icon}</span>
             <div class="name">${m.name}</div>
             <div class="count">${m.desc}</div>
+            ${m.id === 'todo' ? `<span id="home-todo-badge" style="display:none;font-size:10px;padding:2px 8px;border-radius:20px;margin-top:4px;font-weight:600"></span>` : ''}
           </div>`).join('')}
       </div>
       <div class="card" style="margin-top:8px">
@@ -654,6 +680,7 @@ const MemoNest = {
           <span class="icon">${m.icon}</span>
           <div class="name">${m.name}</div>
           <div class="count">${m.desc}</div>
+          ${m.id === 'todo' ? `<span id="home-todo-badge" style="display:none;font-size:10px;padding:2px 8px;border-radius:20px;margin-top:4px;font-weight:600"></span>` : ''}
         </div>`).join('')}
     </div>
     <div style="padding:12px 14px;background:#f8fafc;border-radius:12px;border:1px solid #e2e8f0;display:flex;align-items:center;justify-content:space-between;gap:8px">
@@ -733,17 +760,18 @@ const MemoNest = {
       const priority = props['우선순위']?.select?.name || '';
       const dueDate = props['Due Date']?.date?.start;
       const tags = props['태그']?.multi_select || [];
+      const memo = props['메모']?.rich_text?.[0]?.text?.content || '';
       const isDone = status === '완료';
       const isOverdue = dueDate && new Date(dueDate) < new Date() && !isDone;
       const priorityClass = priority.includes('높음') ? 'priority-high' : priority.includes('낮음') ? 'priority-low' : 'priority-mid';
 
       return `
-      <div class="todo-item ${isDone ? 'done' : ''}">
+      <div class="todo-item ${isDone ? 'done' : ''}" style="position:relative">
         <div class="todo-checkbox ${isDone ? 'checked' : ''}"
           onclick="MemoNest.toggleTodo('${todo.id}', '${isDone ? '미완료' : '완료'}')">
           ${isDone ? '<i class="fas fa-check" style="font-size:12px"></i>' : ''}
         </div>
-        <div class="todo-content">
+        <div class="todo-content" style="flex:1;min-width:0">
           <div class="todo-title">${title}</div>
           <div class="todo-meta">
             ${priority ? `<span class="priority-badge ${priorityClass}">${priority}</span>` : ''}
@@ -753,6 +781,16 @@ const MemoNest = {
             <span class="status-badge ${status === '완료' ? 'status-done' : status === '진행중' ? 'status-doing' : status === '보류' ? 'status-hold' : 'status-todo'}">${status}</span>
             ${tags.map(t => `<span class="tag" style="font-size:10px;padding:2px 7px">#${t.name}</span>`).join('')}
           </div>
+        </div>
+        <div style="display:flex;gap:4px;flex-shrink:0;margin-left:6px">
+          <button onclick="MemoNest.showEditTodo('${todo.id}','${title.replace(/'/g,"&apos;")}','${status}','${priority}','${dueDate||''}','${memo.replace(/'/g,"&apos;")}')" 
+            style="background:none;border:1px solid #e2e8f0;border-radius:6px;padding:4px 8px;cursor:pointer;font-size:11px;color:#64748b" title="수정">
+            <i class="fas fa-pen"></i>
+          </button>
+          <button onclick="MemoNest.deleteTodo('${todo.id}')" 
+            style="background:none;border:1px solid #fee2e2;border-radius:6px;padding:4px 8px;cursor:pointer;font-size:11px;color:#ef4444" title="삭제">
+            <i class="fas fa-trash"></i>
+          </button>
         </div>
       </div>`;
     }).join('');
@@ -819,13 +857,26 @@ const MemoNest = {
           const props = todo.properties;
           const title = props['할 일']?.title?.[0]?.text?.content || '제목 없음';
           const status = props['상태']?.select?.name || '미완료';
+          const priority = props['우선순위']?.select?.name || '';
+          const dueDate = props['Due Date']?.date?.start || '';
+          const memo = props['메모']?.rich_text?.[0]?.text?.content || '';
           const isDone = status === '완료';
-          return `<div class="todo-item ${isDone ? 'done' : ''}">
+          return `<div class="todo-item ${isDone ? 'done' : ''}" style="position:relative">
             <div class="todo-checkbox ${isDone ? 'checked' : ''}" onclick="MemoNest.toggleTodo('${todo.id}', '${isDone ? '미완료' : '완료'}')">
               ${isDone ? '<i class="fas fa-check" style="font-size:12px"></i>' : ''}
             </div>
-            <div class="todo-content"><div class="todo-title">${title}</div>
+            <div class="todo-content" style="flex:1;min-width:0"><div class="todo-title">${title}</div>
               <span class="status-badge ${isDone ? 'status-done' : 'status-todo'}">${status}</span>
+            </div>
+            <div style="display:flex;gap:4px;flex-shrink:0;margin-left:6px">
+              <button onclick="MemoNest.showEditTodo('${todo.id}','${title.replace(/'/g,"&apos;")}','${status}','${priority}','${dueDate}','${memo.replace(/'/g,"&apos;")}')" 
+                style="background:none;border:1px solid #e2e8f0;border-radius:6px;padding:4px 8px;cursor:pointer;font-size:11px;color:#64748b" title="수정">
+                <i class="fas fa-pen"></i>
+              </button>
+              <button onclick="MemoNest.deleteTodo('${todo.id}')" 
+                style="background:none;border:1px solid #fee2e2;border-radius:6px;padding:4px 8px;cursor:pointer;font-size:11px;color:#ef4444" title="삭제">
+                <i class="fas fa-trash"></i>
+              </button>
             </div>
           </div>`;
         }).join('')}
@@ -843,6 +894,70 @@ const MemoNest = {
       this.toast(newStatus === '완료' ? '✅ 완료!' : '↩️ 미완료로 변경', 'success');
       this.loadTodos();
     } catch (e) { this.toast('업데이트 실패', 'error'); }
+  },
+
+  async deleteTodo(pageId) {
+    this.showModal('🗑️ 할 일 삭제', '이 항목을 삭제할까요? (노션에서 아카이브됩니다)', async () => {
+      try {
+        await fetch(`/api/todos/${pageId}`, { method: 'DELETE' });
+        document.getElementById('app-modal')?.remove();
+        this.toast('🗑️ 삭제됐어요', 'success');
+        this.loadTodos();
+      } catch (e) { this.toast('삭제 실패', 'error'); }
+    });
+  },
+
+  showEditTodo(pageId, title, status, priority, dueDate, memo) {
+    this.showModal('✏️ 할 일 수정', `
+      <div class="form-group">
+        <label class="form-label">할 일</label>
+        <input class="form-input" id="edit-todo-title" value="${title}">
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        <div class="form-group">
+          <label class="form-label">상태</label>
+          <select class="form-select" id="edit-todo-status">
+            ${['미완료','진행중','완료','보류'].map(s => `<option value="${s}" ${status===s?'selected':''}>${s}</option>`).join('')}
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">우선순위</label>
+          <select class="form-select" id="edit-todo-priority">
+            ${['높음 🔴','중간 🟡','낮음 🟢'].map(p => `<option value="${p}" ${priority===p?'selected':''}>${p}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Due Date</label>
+        <input class="form-input" type="date" id="edit-todo-due" value="${dueDate}">
+      </div>
+      <div class="form-group">
+        <label class="form-label">메모</label>
+        <textarea class="form-textarea" id="edit-todo-memo" style="min-height:60px">${memo}</textarea>
+      </div>
+      <button class="btn btn-primary btn-block" onclick="MemoNest.saveEditTodo('${pageId}')">
+        <i class="fas fa-save"></i> 수정 저장
+      </button>`, null);
+  },
+
+  async saveEditTodo(pageId) {
+    const btn = document.querySelector('#app-modal .btn-primary');
+    if (btn) { btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 저장 중...'; btn.disabled = true; }
+    try {
+      await fetch(`/api/todos/${pageId}`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: document.getElementById('edit-todo-title')?.value,
+          status: document.getElementById('edit-todo-status')?.value,
+          priority: document.getElementById('edit-todo-priority')?.value,
+          dueDate: document.getElementById('edit-todo-due')?.value || null,
+          memo: document.getElementById('edit-todo-memo')?.value,
+        })
+      });
+      document.getElementById('app-modal')?.remove();
+      this.toast('✅ 수정됐어요!', 'success');
+      this.loadTodos();
+    } catch (e) { this.toast('수정 실패', 'error'); }
   },
 
   showAddTodo() {
@@ -982,7 +1097,15 @@ const MemoNest = {
   async startRecording(type) {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      this.state.mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm;codecs=opus' });
+      // Firefox fallback: audio/webm;codecs=opus 미지원 환경 처리
+      let recMime = 'audio/webm;codecs=opus';
+      if (!MediaRecorder.isTypeSupported(recMime)) {
+        recMime = MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm'
+          : MediaRecorder.isTypeSupported('audio/ogg;codecs=opus') ? 'audio/ogg;codecs=opus' : '';
+      }
+      this.state._recMime = recMime || 'audio/webm';
+      const mrOpts = recMime ? { mimeType: recMime } : {};
+      this.state.mediaRecorder = new MediaRecorder(stream, mrOpts);
       this.state.audioChunks = [];
       this.state.mediaRecorder.ondataavailable = e => this.state.audioChunks.push(e.data);
       this.state.mediaRecorder.start(100);
@@ -1029,7 +1152,8 @@ const MemoNest = {
     this.state.mediaRecorder.stream.getTracks().forEach(t => t.stop());
 
     await new Promise(r => setTimeout(r, 500));
-    const blob = new Blob(this.state.audioChunks, { type: 'audio/webm' });
+    const actualMime = this.state._recMime || 'audio/webm';
+    const blob = new Blob(this.state.audioChunks, { type: actualMime });
 
     // Base64 변환
     const reader = new FileReader();
@@ -1038,7 +1162,7 @@ const MemoNest = {
       try {
         const res = await fetch('/api/stt', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ audioBase64: base64, mimeType: 'audio/webm' })
+          body: JSON.stringify({ audioBase64: base64, mimeType: actualMime, language: this.state.sttSettings.language })
         });
         const data = await res.json();
         if (data.text) {
@@ -1471,6 +1595,10 @@ const MemoNest = {
             onclick="MemoNest.toggleShopping('${item.id}', ${!bought})">
             ${bought ? '↩️' : '✅'}
           </button>
+          <button onclick="MemoNest.deleteShopping('${item.id}')"
+            style="background:none;border:1px solid #fee2e2;border-radius:6px;padding:4px 8px;cursor:pointer;font-size:11px;color:#ef4444;flex-shrink:0;margin-left:4px" title="삭제">
+            <i class="fas fa-trash"></i>
+          </button>
         </div>`;
       }).join('');
     } catch (e) { el.innerHTML = '<p style="color:#ef4444;text-align:center;padding:20px">로드 실패</p>'; }
@@ -1484,6 +1612,17 @@ const MemoNest = {
       });
       this.loadShopping();
     } catch (e) { this.toast('업데이트 실패', 'error'); }
+  },
+
+  async deleteShopping(pageId) {
+    this.showModal('🗑️ 쇼핑 항목 삭제', '이 항목을 삭제할까요?', async () => {
+      try {
+        await fetch(`/api/shopping/${pageId}`, { method: 'DELETE' });
+        document.getElementById('app-modal')?.remove();
+        this.toast('🗑️ 삭제됐어요', 'success');
+        this.loadShopping();
+      } catch (e) { this.toast('삭제 실패', 'error'); }
+    });
   },
 
   showAddShopping() {
@@ -1610,8 +1749,14 @@ const MemoNest = {
         return `
         <div class="card" style="border-color:${borderColor}">
           <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px">
-            <div style="font-size:15px;font-weight:600">📅 ${title}</div>
-            ${badge}
+            <div style="font-size:15px;font-weight:600;flex:1;min-width:0">📅 ${title}</div>
+            <div style="display:flex;align-items:center;gap:6px;flex-shrink:0">
+              ${badge}
+              <button onclick="MemoNest.deleteSchedule('${s.id}')" 
+                style="background:none;border:1px solid #fee2e2;border-radius:6px;padding:3px 7px;cursor:pointer;font-size:11px;color:#ef4444" title="삭제">
+                <i class="fas fa-trash"></i>
+              </button>
+            </div>
           </div>
           <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
             ${datetimeRaw ? `<span style="font-size:12px;color:#475569;display:flex;align-items:center;gap:4px"><i class="fas fa-clock" style="color:var(--primary)"></i> ${datetimeDisplay}</span>` : ''}
@@ -1624,6 +1769,17 @@ const MemoNest = {
         </div>`;
       }).join('');
     } catch (e) { el.innerHTML = '<p style="color:#ef4444;text-align:center;padding:20px">로드 실패</p>'; }
+  },
+
+  async deleteSchedule(pageId) {
+    this.showModal('🗑️ 일정 삭제', '이 일정을 삭제할까요?', async () => {
+      try {
+        await fetch(`/api/schedules/${pageId}`, { method: 'DELETE' });
+        document.getElementById('app-modal')?.remove();
+        this.toast('🗑️ 삭제됐어요', 'success');
+        this.loadSchedules();
+      } catch (e) { this.toast('삭제 실패', 'error'); }
+    });
   },
 
   // ── 현재 로컬 시간 → datetime-local 값 변환 ────────────────────────────────
@@ -1875,9 +2031,9 @@ const MemoNest = {
           </select>
         </div>
         <div class="form-group" style="margin-bottom:0">
-          <label class="form-label">자동 중지 (초) <span style="color:#94a3b8">${s.autoStop}초</span></label>
+          <label class="form-label" id="stt-autostop-label">자동 중지 (초) <span style="color:#94a3b8">${s.autoStop}초</span></label>
           <input type="range" id="stt-autostop" min="5" max="60" value="${s.autoStop}" 
-            oninput="document.querySelector('[for=stt-autostop] span, label .form-label span')?.remove(); this.previousElementSibling.querySelector('span').textContent=this.value+'초'"
+            oninput="const sp=document.querySelector('#stt-autostop-label span');if(sp)sp.textContent=this.value+'초';"
             style="width:100%;accent-color:#6366f1">
         </div>
       </div>
