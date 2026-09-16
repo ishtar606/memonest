@@ -839,13 +839,33 @@ const MemoNest = {
 
   async loadTodos() {
     const dbId = this.state.dbIds.todo;
+    const el = document.getElementById('todo-list');
+    if (!dbId) {
+      if (el) el.innerHTML = `<div style="text-align:center;padding:30px;color:#6b7280">
+        <p style="font-size:32px">⚙️</p>
+        <p style="font-weight:600;margin-bottom:8px">노션 설정이 필요해요</p>
+        <p style="font-size:13px;margin-bottom:16px">홈 → 설정에서 노션 페이지 ID를 연결하거나<br>복원 버튼을 눌러주세요</p>
+        <button class="btn btn-primary" onclick="MemoNest.navigate('home')">🏠 홈으로</button>
+      </div>`;
+      return;
+    }
     try {
       const res = await fetch(`/api/todos?dbId=${dbId}`);
       const data = await res.json();
+      // Notion API 에러 응답 감지 (object_not_found 등)
+      if (data.object === 'error') {
+        if (el) el.innerHTML = `<div style="text-align:center;padding:30px;color:#6b7280">
+          <p style="font-size:32px">🔗</p>
+          <p style="font-weight:600;margin-bottom:8px">노션 DB를 찾을 수 없어요</p>
+          <p style="font-size:12px;color:#9ca3af;margin-bottom:16px">${data.message || 'DB ID가 유효하지 않습니다'}</p>
+          <button class="btn btn-secondary" onclick="MemoNest.recoverNotion()">🔄 DB 복원 시도</button>
+        </div>`;
+        return;
+      }
       this.state.todos = data.results || [];
       this.renderTodoList(this.state.todos);
     } catch (e) {
-      document.getElementById('todo-list').innerHTML = '<p style="color:#ef4444;text-align:center;padding:20px">로드 실패</p>';
+      if (el) el.innerHTML = '<p style="color:#ef4444;text-align:center;padding:20px">로드 실패: 네트워크를 확인해주세요</p>';
     }
   },
 
