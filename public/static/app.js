@@ -413,7 +413,7 @@ const MemoNest = {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status: newStatus })
       });
-      this.toast(newStatus === '완료' ? '✅ 완료!', 'success');
+      this.toast(newStatus === '완료' ? '✅ 완료!' : '↩️ 미완료로 변경', 'success');
       this.loadTodos();
     } catch (e) { this.toast('업데이트 실패', 'error'); }
   },
@@ -1231,10 +1231,10 @@ const MemoNest = {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const mr = new MediaRecorder(stream, { mimeType: 'audio/webm;codecs=opus' });
-      const chunks: BlobPart[] = [];
+      const chunks = [];
       mr.ondataavailable = e => chunks.push(e.data);
 
-      const btn = document.querySelector(`[onclick*="startVoiceInput('${targetId}')"]`) as HTMLButtonElement;
+      const btn = document.querySelector(`[onclick*="startVoiceInput('${targetId}')"]`);
       if (btn) { btn.innerHTML = '<i class="fas fa-stop"></i> 중지'; btn.style.background = '#ef4444'; btn.style.color = 'white'; }
 
       mr.start(100);
@@ -1247,14 +1247,14 @@ const MemoNest = {
         const blob = new Blob(chunks, { type: 'audio/webm' });
         const reader = new FileReader();
         reader.onloadend = async () => {
-          const base64 = (reader.result as string).split(',')[1];
+          const base64 = reader.result.split(',')[1];
           try {
             const res = await fetch('/api/stt', {
               method: 'POST', headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ audioBase64: base64, mimeType: 'audio/webm' })
             });
             const data = await res.json();
-            const target = document.getElementById(targetId) as HTMLInputElement | HTMLTextAreaElement;
+            const target = document.getElementById(targetId);
             if (target && data.text) {
               target.value = (target.value ? target.value + '\n' : '') + data.text;
             }
@@ -1277,13 +1277,13 @@ const MemoNest = {
   },
 
   // ── Tag Helper ─────────────────────────────────────────────────────────────
-  addTag(event: KeyboardEvent, hiddenId: string) {
+  addTag(event, hiddenId) {
     if (event.key !== 'Enter') return;
     event.preventDefault();
-    const input = event.target as HTMLInputElement;
+    const input = event.target;
     const tag = input.value.trim();
     if (!tag) return;
-    const hiddenEl = document.getElementById(hiddenId) as HTMLInputElement;
+    const hiddenEl = document.getElementById(hiddenId);
     const tags = JSON.parse(hiddenEl?.value || '[]');
     if (tags.includes(tag)) { input.value = ''; return; }
     tags.push(tag);
@@ -1298,9 +1298,9 @@ const MemoNest = {
     input.value = '';
   },
 
-  removeTag(hiddenId: string, tag: string, btn: HTMLButtonElement) {
-    const hiddenEl = document.getElementById(hiddenId) as HTMLInputElement;
-    const tags = JSON.parse(hiddenEl?.value || '[]').filter((t: string) => t !== tag);
+  removeTag(hiddenId, tag, btn) {
+    const hiddenEl = document.getElementById(hiddenId);
+    const tags = JSON.parse(hiddenEl?.value || '[]').filter(t => t !== tag);
     if (hiddenEl) hiddenEl.value = JSON.stringify(tags);
     btn.parentElement?.remove();
   },
