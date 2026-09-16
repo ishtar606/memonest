@@ -536,12 +536,16 @@ const MemoNest = {
   // ══════════════════════════════════════════════════════════════════════════
   renderTodo() {
     return `
-    <div id="todo-filter" style="display:flex;gap:8px;margin-bottom:14px;overflow-x:auto;padding-bottom:4px">
-      <button class="diary-tab active" onclick="MemoNest.filterTodos('all', this)">전체</button>
-      <button class="diary-tab" onclick="MemoNest.filterTodos('미완료', this)">미완료</button>
-      <button class="diary-tab" onclick="MemoNest.filterTodos('진행중', this)">진행중</button>
-      <button class="diary-tab" onclick="MemoNest.filterTodos('완료', this)">완료</button>
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;flex-wrap:wrap;gap:8px">
+      <div id="todo-filter" style="display:flex;gap:6px;overflow-x:auto;padding-bottom:2px">
+        <button class="diary-tab active" onclick="MemoNest.filterTodos('all', this)">전체</button>
+        <button class="diary-tab" onclick="MemoNest.filterTodos('미완료', this)">미완료</button>
+        <button class="diary-tab" onclick="MemoNest.filterTodos('진행중', this)">진행중</button>
+        <button class="diary-tab" onclick="MemoNest.filterTodos('완료', this)">완료</button>
+        <button class="diary-tab" onclick="MemoNest.filterTodos('tag', this)">🏷️ 태그별</button>
+      </div>
     </div>
+    <div id="todo-tag-filter" style="display:none;margin-bottom:12px"></div>
     <div id="todo-list"><div class="loading"><div class="spinner"></div></div></div>`;
   },
 
@@ -569,6 +573,7 @@ const MemoNest = {
       const status = props['상태']?.select?.name || '미완료';
       const priority = props['우선순위']?.select?.name || '';
       const dueDate = props['Due Date']?.date?.start;
+      const tags = props['태그']?.multi_select || [];
       const isDone = status === '완료';
       const isOverdue = dueDate && new Date(dueDate) < new Date() && !isDone;
       const priorityClass = priority.includes('높음') ? 'priority-high' : priority.includes('낮음') ? 'priority-low' : 'priority-mid';
@@ -587,6 +592,7 @@ const MemoNest = {
               <i class="fas fa-calendar"></i> ${dueDate}${isOverdue ? ' ⚠️' : ''}
             </span>` : ''}
             <span class="status-badge ${status === '완료' ? 'status-done' : status === '진행중' ? 'status-doing' : status === '보류' ? 'status-hold' : 'status-todo'}">${status}</span>
+            ${tags.map(t => `<span class="tag" style="font-size:10px;padding:2px 7px">#${t.name}</span>`).join('')}
           </div>
         </div>
       </div>`;
@@ -596,9 +602,76 @@ const MemoNest = {
   filterTodos(filter, btn) {
     document.querySelectorAll('#todo-filter .diary-tab').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
-    const filtered = filter === 'all' ? this.state.todos
-      : this.state.todos.filter(t => t.properties['상태']?.select?.name === filter);
+    const tagFilterEl = document.getElementById('todo-tag-filter');
+
+    if (filter === 'tag') {
+      // 태그 목록 수집
+      const tagMap = {};
+      this.state.todos.forEach(t => {
+        const tags = t.properties['태그']?.multi_select || [];
+        tags.forEach(tag => {
+          if (!tagMap[tag.name]) tagMap[tag.name] = [];
+          tagMap[tag.name].push(t);
+        });
+      });
+      const tagNames = Object.keys(tagMap);
+      if (!tagNames.length) {
+        if (tagFilterEl) tagFilterEl.style.display = 'none';
+        this.renderTodoList(this.state.todos);
+        this.toast('등록된 태그가 없어요', 'info');
+        return;
+      }
+      if (tagFilterEl) {
+        tagFilterEl.style.display = 'flex';
+        tagFilterEl.style.flexWrap = 'wrap';
+        tagFilterEl.style.gap = '6px';
+        tagFilterEl.innerHTML = tagNames.map(name =>
+          `<button class="tag" style="cursor:pointer;padding:5px 12px;font-size:12px"
+            onclick="MemoNest.filterByTag('${name}')">#${name} (${tagMap[name].length})</button>`
+        ).join('');
+      }
+      // 태그별 그룹 렌더링
+      this.renderTodoByTag(tagMap);
+    } else {
+      if (tagFilterEl) tagFilterEl.style.display = 'none';
+      const filtered = filter === 'all' ? this.state.todos
+        : this.state.todos.filter(t => t.properties['상태']?.select?.name === filter);
+      this.renderTodoList(filtered);
+    }
+  },
+
+  filterByTag(tagName) {
+    const filtered = this.state.todos.filter(t =>
+      (t.properties['태그']?.multi_select || []).some(tag => tag.name === tagName)
+    );
     this.renderTodoList(filtered);
+  },
+
+  renderTodoByTag(tagMap) {
+    const el = document.getElementById('todo-list');
+    if (!el) return;
+    const html = Object.entries(tagMap).map(([tagName, todos]) => `
+      <div style="margin-bottom:16px">
+        <div style="font-size:12px;font-weight:700;color:var(--primary);margin-bottom:8px;display:flex;align-items:center;gap:6px">
+          <span style="background:rgba(99,102,241,0.1);padding:3px 10px;border-radius:20px">#${tagName}</span>
+          <span style="color:var(--text-muted);font-weight:400">${todos.length}개</span>
+        </div>
+        ${todos.map(todo => {
+          const props = todo.properties;
+          const title = props['할 일']?.title?.[0]?.text?.content || '제목 없음';
+          const status = props['상태']?.select?.name || '미완료';
+          const isDone = status === '완료';
+          return `<div class="todo-item ${isDone ? 'done' : ''}">
+            <div class="todo-checkbox ${isDone ? 'checked' : ''}" onclick="MemoNest.toggleTodo('${todo.id}', '${isDone ? '미완료' : '완료'}')">
+              ${isDone ? '<i class="fas fa-check" style="font-size:12px"></i>' : ''}
+            </div>
+            <div class="todo-content"><div class="todo-title">${title}</div>
+              <span class="status-badge ${isDone ? 'status-done' : 'status-todo'}">${status}</span>
+            </div>
+          </div>`;
+        }).join('')}
+      </div>`).join('');
+    el.innerHTML = html || '<div class="empty-state"><span class="emoji">🏷️</span><p>태그가 없어요</p></div>';
   },
 
   async toggleTodo(pageId, newStatus) {
@@ -1324,7 +1397,16 @@ const MemoNest = {
   // SCHEDULE
   // ══════════════════════════════════════════════════════════════════════════
   renderSchedule() {
+    const gmtStr = this.getGMTOffsetStr();
+    const tzName = this.getTimezoneName();
     return `
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;padding:10px 14px;background:rgba(99,102,241,0.06);border-radius:12px;border:1px solid rgba(99,102,241,0.15)">
+      <span style="font-size:16px">🌐</span>
+      <div>
+        <div style="font-size:13px;font-weight:600;color:var(--primary)">${gmtStr} 기준으로 표시 중</div>
+        <div style="font-size:11px;color:var(--text-muted)">${tzName} · 현재 단말 시간대</div>
+      </div>
+    </div>
     <div id="schedule-list"><div class="loading"><div class="spinner"></div></div></div>`;
   },
 
@@ -1339,33 +1421,98 @@ const MemoNest = {
       el.innerHTML = results.map(s => {
         const props = s.properties;
         const title = props['일정 제목']?.title?.[0]?.text?.content || '제목 없음';
-        const datetime = props['날짜/시간']?.date?.start || '';
+        const datetimeRaw = props['날짜/시간']?.date?.start || '';
         const location = props['장소']?.rich_text?.[0]?.text?.content || '';
         const category = props['카테고리']?.select?.name || '';
+        const reminder = props['알림']?.select?.name || '';
+
+        // 로컬 시간으로 포맷
+        let datetimeDisplay = datetimeRaw;
+        let isUpcoming = false;
+        let isPast = false;
+        if (datetimeRaw) {
+          try {
+            const dt = new Date(datetimeRaw);
+            const now = new Date();
+            isUpcoming = dt > now && dt - now < 24 * 60 * 60 * 1000;
+            isPast = dt < now;
+            datetimeDisplay = dt.toLocaleString('ko-KR', {
+              year: 'numeric', month: 'long', day: 'numeric',
+              weekday: 'short', hour: '2-digit', minute: '2-digit',
+              hour12: false
+            });
+          } catch(e) {}
+        }
+
+        const borderColor = isUpcoming ? '#f59e0b' : isPast ? '#e2e8f0' : '#e2e8f0';
+        const badge = isUpcoming ? `<span style="background:#fef3c7;color:#d97706;font-size:11px;padding:2px 8px;border-radius:20px;font-weight:600">⏰ 오늘 예정</span>`
+          : isPast ? `<span style="background:#f1f5f9;color:#94a3b8;font-size:11px;padding:2px 8px;border-radius:20px">지난 일정</span>` : '';
+
         return `
-        <div class="card">
-          <div style="font-size:15px;font-weight:600;margin-bottom:6px">📅 ${title}</div>
-          <div style="font-size:12px;color:#64748b;display:flex;gap:10px;flex-wrap:wrap">
-            ${datetime ? `<span><i class="fas fa-clock"></i> ${datetime}</span>` : ''}
-            ${location ? `<span><i class="fas fa-map-marker-alt"></i> ${location}</span>` : ''}
+        <div class="card" style="border-color:${borderColor}">
+          <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px">
+            <div style="font-size:15px;font-weight:600">📅 ${title}</div>
+            ${badge}
+          </div>
+          <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+            ${datetimeRaw ? `<span style="font-size:12px;color:#475569;display:flex;align-items:center;gap:4px"><i class="fas fa-clock" style="color:var(--primary)"></i> ${datetimeDisplay}</span>` : ''}
+            ${location ? `<span style="font-size:12px;color:#64748b;display:flex;align-items:center;gap:4px"><i class="fas fa-map-marker-alt"></i> ${location}</span>` : ''}
+          </div>
+          <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">
             ${category ? `<span class="tag">${category}</span>` : ''}
+            ${reminder && reminder !== '없음' ? `<span class="tag" style="background:rgba(245,158,11,0.1);color:#d97706">🔔 ${reminder}</span>` : ''}
           </div>
         </div>`;
       }).join('');
     } catch (e) { el.innerHTML = '<p style="color:#ef4444;text-align:center;padding:20px">로드 실패</p>'; }
   },
 
+  // ── 현재 로컬 시간 → datetime-local 값 변환 ────────────────────────────────
+  getLocalDatetimeStr(date = new Date()) {
+    // 브라우저 로컬 시간 기준 YYYY-MM-DDTHH:MM
+    const pad = n => String(n).padStart(2, '0');
+    return `${date.getFullYear()}-${pad(date.getMonth()+1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  },
+
+  // ── 현재 단말 GMT 오프셋 문자열 반환 ──────────────────────────────────────
+  getGMTOffsetStr() {
+    const offset = -new Date().getTimezoneOffset(); // 분 단위
+    const sign = offset >= 0 ? '+' : '-';
+    const abs = Math.abs(offset);
+    const h = Math.floor(abs / 60);
+    const m = abs % 60;
+    return `GMT${sign}${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`;
+  },
+
+  // ── 타임존 이름 반환 ──────────────────────────────────────────────────────
+  getTimezoneName() {
+    try {
+      return Intl.DateTimeFormat().resolvedOptions().timeZone;
+    } catch { return ''; }
+  },
+
   showAddSchedule() {
     const now = new Date();
-    const dateStr = now.toISOString().slice(0, 16);
+    const localStr = this.getLocalDatetimeStr(now);
+    const gmtStr = this.getGMTOffsetStr();
+    const tzName = this.getTimezoneName();
+
     this.showModal('📅 일정 추가', `
       <div class="form-group">
         <label class="form-label">일정 제목 *</label>
         <input class="form-input" id="sch-title" placeholder="일정 제목">
       </div>
       <div class="form-group">
-        <label class="form-label">날짜/시간</label>
-        <input class="form-input" type="datetime-local" id="sch-datetime" value="${dateStr}">
+        <label class="form-label">
+          날짜/시간
+          <span style="font-size:11px;font-weight:400;color:var(--primary);margin-left:6px;background:rgba(99,102,241,0.1);padding:2px 8px;border-radius:20px">
+            🌐 ${gmtStr} · ${tzName}
+          </span>
+        </label>
+        <input class="form-input" type="datetime-local" id="sch-datetime" value="${localStr}">
+        <div style="font-size:11px;color:var(--text-muted);margin-top:4px">
+          ⏰ 현재 단말 로컬 시간 기준으로 저장됩니다
+        </div>
       </div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
         <div class="form-group">
@@ -1401,12 +1548,25 @@ const MemoNest = {
     if (!title) { this.toast('제목을 입력해주세요', 'error'); return; }
     const btn = document.querySelector('#app-modal .btn-primary');
     if (btn) { btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 저장 중...'; btn.disabled = true; }
+
+    // 로컬 시간 → ISO 8601 (타임존 오프셋 포함)
+    const datetimeVal = document.getElementById('sch-datetime')?.value; // YYYY-MM-DDTHH:MM
+    let datetimeISO = datetimeVal;
+    if (datetimeVal) {
+      const offset = -new Date().getTimezoneOffset();
+      const sign = offset >= 0 ? '+' : '-';
+      const h = Math.floor(Math.abs(offset) / 60);
+      const m = Math.abs(offset) % 60;
+      const tzStr = `${sign}${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`;
+      datetimeISO = `${datetimeVal}:00${tzStr}`; // 노션 API는 오프셋 포함 ISO 지원
+    }
+
     try {
       await fetch('/api/schedules', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           dbId: this.state.dbIds.schedule, title,
-          datetime: document.getElementById('sch-datetime')?.value,
+          datetime: datetimeISO,
           location: document.getElementById('sch-location')?.value,
           category: document.getElementById('sch-category')?.value,
           reminder: document.getElementById('sch-reminder')?.value,
