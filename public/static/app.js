@@ -4,8 +4,13 @@
 const MemoNest = {
   // ── State ──────────────────────────────────────────────────────────────────
   // ── 앱 버전/개발 로그 ─────────────────────────────────────────────────────
-  VERSION: '2.1.3',
+  VERSION: '2.1.4',
   CHANGELOG: [
+    { ver: '2.1.4', date: '2026-09-16', changes: [
+      'Bug Fix: 비대면링크 포함 일정 편집버튼 안눌리는 문제 — onclick 인라인 특수문자 깨짐 → data-sid + _scheduleCache 방식으로 근본 해결',
+      '장소 자동 파싱: "SKT A타워 3층 회의실 A" → Maps는 "SKT A타워"만 검색, "3층 회의실 A"는 목록에 인라인 표시',
+      '입력 hint: Maps 검색어 미리보기 + 층/호실 분리 안내',
+    ] },
     { ver: '2.1.3', date: '2026-09-16', changes: [
       'Bug Fix: 일정 장소+비대면 링크 동시 저장 지원 — 2개 입력칸 분리 (장소명 / 비대면 링크)',
       '저장 포맷: "장소명\\n[링크]" 구분자 — Notion DB 스키마 변경 없이 둘 다 저장',
@@ -382,6 +387,24 @@ const MemoNest = {
     return '';
   },
 
+  // 장소 문자열에서 구글맵스 검색용 핵심 주소와 상세 정보(층·호실 등) 분리
+  // 예: "SKT A타워 3층 회의실 A" → { address: "SKT A타워", detail: "3층 회의실 A" }
+  // 예: "강남역 2번 출구 앞 스타벅스" → { address: "강남역 2번 출구 앞 스타벅스", detail: "" }
+  _splitPlaceDetail(place) {
+    if (!place) return { address: '', detail: '' };
+    // 층·호·실·번지 패턴 감지
+    const detailPattern = /\s+(\d+층|\d+F|B\d+층?|\d+호|[A-Za-z]\동|\d+번\s*출구|\d+번\s*게이트|[가-힣]+\s*회의실|[가-힣]+\s*강의실|[가-힣]+\s*홀|[A-Z]\d*\s*룸|room\s*\w+)/i;
+    const match = place.match(detailPattern);
+    if (match) {
+      const idx = place.indexOf(match[0]);
+      return {
+        address: place.slice(0, idx).trim(),
+        detail: place.slice(idx).trim(),
+      };
+    }
+    return { address: place.trim(), detail: '' };
+  },
+
   // URL 여부 판별
   _isUrl(str) {
     return /^(https?:\/\/|zoom\.us|meet\.google\.com|teams\.microsoft\.com)/i.test((str || '').trim());
@@ -399,23 +422,25 @@ const MemoNest = {
     return { icon: '🌐', name: '링크 열기' };
   },
 
-  // 장소 raw 문자열 → 목록 표시용 HTML (장소 + 링크 둘 다 표시 가능)
+  // 장소 raw 문자열 → 목록 표시용 HTML
+  // 장소명은 핵심주소만 Maps 링크, 층·회의실 등 상세는 인라인 텍스트로 함께 표시
   _renderLocationBadge(raw) {
     if (!raw) return '';
     const { place, link } = this._parseLocation(raw);
     let html = '';
 
-    // 장소명 → Google Maps 링크
     if (place && !this._isUrl(place)) {
-      const mapsUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(place)}`;
+      const { address, detail } = this._splitPlaceDetail(place);
+      const searchTarget = address || place;
+      const mapsUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(searchTarget)}`;
       html += `<a href="${mapsUrl}" target="_blank" rel="noopener"
         style="font-size:12px;color:#64748b;display:inline-flex;align-items:center;gap:4px;text-decoration:none;cursor:pointer"
         title="Google Maps에서 보기">
-        <i class="fas fa-map-marker-alt" style="color:#ef4444"></i> ${place}
+        <i class="fas fa-map-marker-alt" style="color:#ef4444"></i> ${address || place}
         <i class="fas fa-external-link-alt" style="font-size:10px;opacity:0.5"></i>
-      </a>`;
+      </a>${detail ? `<span style="font-size:12px;color:#6b7280;margin-left:2px">· ${detail}</span>` : ''}`;
     } else if (place && this._isUrl(place)) {
-      // place 자리에 URL만 넣은 구버전 데이터 호환
+      // 구버전 호환: place 자리에 URL만 있던 경우
       const href = place.startsWith('http') ? place : `https://${place}`;
       const meta = this._getOnlineMeta(place);
       html += `<a href="${href}" target="_blank" rel="noopener"
@@ -429,8 +454,8 @@ const MemoNest = {
     if (link) {
       const href = link.startsWith('http') ? link : `https://${link}`;
       const meta = this._getOnlineMeta(link);
-      html += `${place ? '<span style="margin:0 2px;color:#d1d5db">·</span>' : ''}
-        <a href="${href}" target="_blank" rel="noopener"
+      html += `${place ? '<span style="margin:0 4px;color:#d1d5db">·</span>' : ''}` +
+        `<a href="${href}" target="_blank" rel="noopener"
           style="font-size:12px;color:#6366f1;display:inline-flex;align-items:center;gap:4px;
                  background:rgba(99,102,241,0.08);border:1px solid rgba(99,102,241,0.2);
                  border-radius:20px;padding:2px 10px;text-decoration:none;"
@@ -440,7 +465,7 @@ const MemoNest = {
     return html;
   },
 
-  // 장소 입력 hint (각 필드별)
+  // 장소 입력 hint
   onLocationInput(inputId) {
     const val = (document.getElementById(inputId)?.value || '').trim();
     const hint = document.getElementById(inputId + '-hint');
@@ -450,9 +475,10 @@ const MemoNest = {
       const meta = this._getOnlineMeta(val);
       hint.innerHTML = `<span style="color:#6366f1;font-size:11px">${meta.icon} 비대면 링크 감지 → 목록에서 바로 클릭 가능</span>`;
     } else if (val.length >= 2) {
-      const mapsUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(val)}`;
-      hint.innerHTML = `<span style="color:#64748b;font-size:11px">📍 실제 장소 →
-        <a href="${mapsUrl}" target="_blank" rel="noopener" style="color:#ef4444;text-decoration:underline">Google Maps 확인</a></span>`;
+      const { address, detail } = this._splitPlaceDetail(val);
+      const mapsUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address || val)}`;
+      const detailHint = detail ? ` <span style="color:#9ca3af">· "${detail}" 은 Maps 검색 제외, 목록에 인라인 표시</span>` : '';
+      hint.innerHTML = `<span style="color:#64748b;font-size:11px">📍 Maps 검색어: <a href="${mapsUrl}" target="_blank" rel="noopener" style="color:#ef4444;text-decoration:underline">${address || val}</a>${detailHint}</span>`;
     } else {
       hint.innerHTML = '';
     }
@@ -2314,13 +2340,25 @@ const MemoNest = {
       }
       const results = data.results || [];
       if (!results.length) { el.innerHTML = '<div class="empty-state"><span class="emoji">📅</span><p>일정이 없어요!<br>+ 버튼으로 추가해보세요</p></div>'; return; }
+
+      // onclick 인라인에 데이터 직접 삽입 시 \n·"·' 등 특수문자로 버튼이 깨지는 문제 방지
+      // → 데이터를 캐시에 저장하고 pageId만 참조
+      this._scheduleCache = {};
+      results.forEach(s => {
+        const props = s.properties;
+        this._scheduleCache[s.id] = {
+          title:    props['일정 제목']?.title?.[0]?.text?.content || '제목 없음',
+          datetime: props['날짜/시간']?.date?.start || '',
+          location: props['장소']?.rich_text?.[0]?.text?.content || '',
+          category: props['카테고리']?.select?.name || '',
+          reminder: props['알림']?.select?.name || '',
+          memo:     props['메모']?.rich_text?.[0]?.text?.content || '',
+        };
+      });
+
       el.innerHTML = results.map(s => {
         const props = s.properties;
-        const title = props['일정 제목']?.title?.[0]?.text?.content || '제목 없음';
-        const datetimeRaw = props['날짜/시간']?.date?.start || '';
-        const location = props['장소']?.rich_text?.[0]?.text?.content || '';
-        const category = props['카테고리']?.select?.name || '';
-        const reminder = props['알림']?.select?.name || '';
+        const { title, datetime: datetimeRaw, location, category, reminder } = this._scheduleCache[s.id];
 
         // 로컬 시간으로 포맷
         let datetimeDisplay = datetimeRaw;
@@ -2350,11 +2388,11 @@ const MemoNest = {
             <div style="font-size:15px;font-weight:600;flex:1;min-width:0">📅 ${title}</div>
             <div style="display:flex;align-items:center;gap:4px;flex-shrink:0">
               ${badge}
-              <button onclick="MemoNest.showEditSchedule('${s.id}','${title.replace(/'/g,"&apos;")}','${datetimeRaw}','${location.replace(/'/g,"&apos;")}','${category}','${reminder}','${(props['메모']?.rich_text?.[0]?.text?.content||'').replace(/'/g,"&apos;")}')" 
+              <button data-sid="${s.id}" onclick="MemoNest.showEditScheduleById(this.dataset.sid)"
                 style="background:none;border:1px solid #e2e8f0;border-radius:6px;padding:3px 7px;cursor:pointer;font-size:11px;color:#64748b" title="수정">
                 <i class="fas fa-pen"></i>
               </button>
-              <button onclick="MemoNest.deleteSchedule('${s.id}')" 
+              <button data-sid="${s.id}" onclick="MemoNest.deleteSchedule(this.dataset.sid)"
                 style="background:none;border:1px solid #fee2e2;border-radius:6px;padding:3px 7px;cursor:pointer;font-size:11px;color:#ef4444" title="삭제">
                 <i class="fas fa-trash"></i>
               </button>
@@ -2371,6 +2409,13 @@ const MemoNest = {
         </div>`;
       }).join('');
     } catch (e) { el.innerHTML = '<p style="color:#ef4444;text-align:center;padding:20px">로드 실패</p>'; }
+  },
+
+  // 캐시에서 꺼내서 수정 모달 열기 (특수문자 안전)
+  showEditScheduleById(pageId) {
+    const d = this._scheduleCache?.[pageId];
+    if (!d) { this.toast('일정 데이터를 찾을 수 없어요. 새로고침 후 다시 시도해주세요.', 'error'); return; }
+    this.showEditSchedule(pageId, d.title, d.datetime, d.location, d.category, d.reminder, d.memo);
   },
 
   showEditSchedule(pageId, title, datetimeRaw, location, category, reminder, memo) {
