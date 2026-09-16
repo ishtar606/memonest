@@ -4,8 +4,12 @@
 const MemoNest = {
   // ── State ──────────────────────────────────────────────────────────────────
   // ── 앱 버전/개발 로그 ─────────────────────────────────────────────────────
-  VERSION: '2.1.0',
+  VERSION: '2.1.1',
   CHANGELOG: [
+    { ver: '2.1.1', date: '2026-09-16', changes: [
+      'Bug Fix: 앱 내부 DB 복원 모달 추가 (recoverFromApp) — loadTodos 에러 화면에서 바로 복원 가능',
+      'Bug Fix: loadShopping/loadSchedules/loadMeetings 에 Notion 에러 응답 감지 + 복원 버튼 추가 (일관성)',
+    ] },
     { ver: '2.1.0', date: '2026-09-16', changes: [
       'Phase 2.1-a: 일정 수정 기능 (PATCH /api/schedules/:pageId + 인라인 수정 폼)',
       'Phase 2.1-b: ToDo 반복 태스크 완료 시 다음 날짜 자동 재생성 (매일/매주/매월)',
@@ -340,6 +344,65 @@ const MemoNest = {
         </div>
       </div>
     </div>`;
+  },
+
+  // ── 앱 내부 DB 복원 (모달 진입) ─────────────────────────────────────────
+  recoverFromApp() {
+    this.showModal('🔄 노션 DB 복원', `
+      <p style="font-size:13px;color:#6b7280;margin-bottom:14px">
+        노션 페이지 ID를 입력하면 기존 DB를 자동으로 찾아 연결해요.
+      </p>
+      <label style="font-size:12px;font-weight:600;color:#374151;display:block;margin-bottom:6px">노션 페이지 ID</label>
+      <input class="form-input" id="recover-page-id" placeholder="예: 3dda1219f259816b81a6e254cd0c4669"
+        style="font-family:monospace;font-size:13px;margin-bottom:6px">
+      <p style="font-size:11px;color:#9ca3af;margin:0">
+        노션 페이지 URL의 마지막 32자리 영문숫자 (하이픈 있어도 됩니다)
+      </p>
+      <div id="recover-result" style="margin-top:12px"></div>
+    `, () => this.doRecoverFromApp());
+  },
+
+  async doRecoverFromApp() {
+    const pageId = document.getElementById('recover-page-id')?.value?.trim();
+    if (!pageId || pageId.length < 10) {
+      this.toast('노션 페이지 ID를 입력해주세요', 'error');
+      return;
+    }
+    const cleanId = pageId.replace(/-/g, '').replace(/.*([a-f0-9]{32}).*/i, '$1');
+    const btn = document.getElementById('modal-confirm-btn');
+    const resultEl = document.getElementById('recover-result');
+    if (btn) { btn.textContent = '탐색 중...'; btn.disabled = true; }
+    if (resultEl) resultEl.innerHTML = `<div style="display:flex;align-items:center;gap:8px;font-size:13px;color:#6b7280"><div class="spinner" style="width:14px;height:14px;border-width:2px"></div> 노션 DB를 탐색하고 있어요...</div>`;
+    try {
+      const res = await fetch('/api/notion/recover', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ parentPageId: cleanId })
+      });
+      const data = await res.json();
+      if (data.success && data.found === 7) {
+        this.state.dbIds = data.databases;
+        this.save('dbIds', data.databases);
+        this.state.isSetupDone = true;
+        document.getElementById('app-modal')?.remove();
+        const deletedCount = data.deleted?.length || 0;
+        const skippedCount = data.skipped?.length || 0;
+        let msg = `🎉 DB ${data.found}개 복원 완료!`;
+        if (deletedCount > 0) msg += ` · 빈 중복 ${deletedCount}개 자동 삭제`;
+        if (skippedCount > 0) msg += ` · 데이터 있는 중복 ${skippedCount}개 보존`;
+        this.toast(msg, 'success', 5000);
+        this.render();
+      } else if (data.success && data.found > 0) {
+        if (resultEl) resultEl.innerHTML = `<p style="color:#d97706;font-size:13px">⚠️ ${data.found}/7개만 찾았어요.<br>"DB 자동 생성" 버튼으로 나머지를 생성해주세요.</p>`;
+        if (btn) { btn.textContent = '확인'; btn.disabled = false; }
+      } else {
+        if (resultEl) resultEl.innerHTML = `<p style="color:#ef4444;font-size:13px">😢 해당 페이지에서 DB를 찾지 못했어요.<br>페이지 ID를 다시 확인해주세요.</p>`;
+        if (btn) { btn.textContent = '다시 시도'; btn.disabled = false; }
+      }
+    } catch (e) {
+      if (resultEl) resultEl.innerHTML = `<p style="color:#ef4444;font-size:13px">오류: ${e.message}</p>`;
+      if (btn) { btn.textContent = '다시 시도'; btn.disabled = false; }
+    }
   },
 
   async recoverNotion() {
@@ -858,7 +921,7 @@ const MemoNest = {
           <p style="font-size:32px">🔗</p>
           <p style="font-weight:600;margin-bottom:8px">노션 DB를 찾을 수 없어요</p>
           <p style="font-size:12px;color:#9ca3af;margin-bottom:16px">${data.message || 'DB ID가 유효하지 않습니다'}</p>
-          <button class="btn btn-secondary" onclick="MemoNest.recoverNotion()">🔄 DB 복원 시도</button>
+          <button class="btn btn-secondary" onclick="MemoNest.recoverFromApp()">🔄 DB 복원 시도</button>
         </div>`;
         return;
       }
@@ -1495,6 +1558,14 @@ const MemoNest = {
     try {
       const res = await fetch(`/api/meetings?dbId=${this.state.dbIds.meeting}`);
       const data = await res.json();
+      if (data.object === 'error') {
+        el.innerHTML = `<div style="text-align:center;padding:30px;color:#6b7280">
+          <p style="font-size:32px">🔗</p>
+          <p style="font-weight:600;margin-bottom:8px">노션 DB를 찾을 수 없어요</p>
+          <p style="font-size:12px;color:#9ca3af;margin-bottom:16px">${data.message || 'DB ID가 유효하지 않습니다'}</p>
+          <button class="btn btn-secondary" onclick="MemoNest.recoverFromApp()">🔄 DB 복원 시도</button>
+        </div>`; return;
+      }
       const results = data.results || [];
       if (!results.length) { el.innerHTML = '<div class="empty-state"><span class="emoji">🎙️</span><p>아직 회의록이 없어요</p></div>'; return; }
       el.innerHTML = results.slice(0, 5).map(m => {
@@ -1918,6 +1989,14 @@ const MemoNest = {
     try {
       const res = await fetch(`/api/shopping?dbId=${this.state.dbIds.shopping}`);
       const data = await res.json();
+      if (data.object === 'error') {
+        el.innerHTML = `<div style="text-align:center;padding:30px;color:#6b7280">
+          <p style="font-size:32px">🔗</p>
+          <p style="font-weight:600;margin-bottom:8px">노션 DB를 찾을 수 없어요</p>
+          <p style="font-size:12px;color:#9ca3af;margin-bottom:16px">${data.message || 'DB ID가 유효하지 않습니다'}</p>
+          <button class="btn btn-secondary" onclick="MemoNest.recoverFromApp()">🔄 DB 복원 시도</button>
+        </div>`; return;
+      }
       const results = data.results || [];
       if (!results.length) {
         el.innerHTML = '<div class="empty-state"><span class="emoji">🛒</span><p>장보기 목록이 비어있어요!<br>+ 버튼으로 추가해보세요</p></div>';
@@ -2113,6 +2192,14 @@ const MemoNest = {
     try {
       const res = await fetch(`/api/schedules?dbId=${this.state.dbIds.schedule}`);
       const data = await res.json();
+      if (data.object === 'error') {
+        el.innerHTML = `<div style="text-align:center;padding:30px;color:#6b7280">
+          <p style="font-size:32px">🔗</p>
+          <p style="font-weight:600;margin-bottom:8px">노션 DB를 찾을 수 없어요</p>
+          <p style="font-size:12px;color:#9ca3af;margin-bottom:16px">${data.message || 'DB ID가 유효하지 않습니다'}</p>
+          <button class="btn btn-secondary" onclick="MemoNest.recoverFromApp()">🔄 DB 복원 시도</button>
+        </div>`; return;
+      }
       const results = data.results || [];
       if (!results.length) { el.innerHTML = '<div class="empty-state"><span class="emoji">📅</span><p>일정이 없어요!<br>+ 버튼으로 추가해보세요</p></div>'; return; }
       el.innerHTML = results.map(s => {
