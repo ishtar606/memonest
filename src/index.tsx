@@ -10,8 +10,67 @@ type Bindings = {
 
 const app = new Hono<{ Bindings: Bindings }>()
 
+// ─── Rate Limiter (in-memory, per Worker instance) ────────────────────────────
+// Cloudflare Workers는 인스턴스별 메모리 — 분산 rate limit는 D1/KV 필요
+// 현재는 Genspark Identity 인증으로 1인 사용자이므로 간단한 in-process 제한으로 충분
+const rateLimitMap = new Map<string, { count: number; resetAt: number }>()
+
+function checkRateLimit(key: string, maxRequests: number, windowMs: number): boolean {
+  const now = Date.now()
+  const entry = rateLimitMap.get(key)
+  if (!entry || now > entry.resetAt) {
+    rateLimitMap.set(key, { count: 1, resetAt: now + windowMs })
+    return true // allowed
+  }
+  if (entry.count >= maxRequests) return false // blocked
+  entry.count++
+  return true
+}
+
+// ─── Helper: Get Genspark User from headers ────────────────────────────────────
+function getGensparkUser(request: Request) {
+  const decode = (v: string | null) => { try { return v ? decodeURIComponent(v) : null } catch { return v } }
+  const id = decode(request.headers.get('X-Genspark-User-Id'))
+  if (!id) return null
+  return {
+    id,
+    email: decode(request.headers.get('X-Genspark-User-Email')),
+    name: decode(request.headers.get('X-Genspark-User-Name')),
+  }
+}
+
 app.use('*', cors())
 app.use('/static/*', serveStatic({ root: './' }))
+
+// ─── Rate Limit Middleware: AI/STT 엔드포인트 보호 ────────────────────────────
+// Gemini: 분당 5회, 일 100회 제한 (무료 한도 훨씬 이내)
+// Groq STT: 분당 3회 제한 (무료 25req/분 이내)
+app.use('/api/ai/*', async (c, next) => {
+  const user = getGensparkUser(c.req.raw)
+  const key = `ai:${user?.id || c.req.header('CF-Connecting-IP') || 'unknown'}`
+  if (!checkRateLimit(key, 5, 60_000)) {
+    return c.json({ error: 'Rate limit exceeded. AI 기능은 분당 5회까지 사용 가능합니다.' }, 429)
+  }
+  await next()
+})
+
+app.use('/api/stt', async (c, next) => {
+  const user = getGensparkUser(c.req.raw)
+  const key = `stt:${user?.id || c.req.header('CF-Connecting-IP') || 'unknown'}`
+  if (!checkRateLimit(key, 3, 60_000)) {
+    return c.json({ error: 'Rate limit exceeded. STT는 분당 3회까지 사용 가능합니다.', text: '' }, 429)
+  }
+  await next()
+})
+
+// ─── Body Size Guard: 오디오 업로드 크기 제한 (5MB) ──────────────────────────
+app.use('/api/stt', async (c, next) => {
+  const contentLength = parseInt(c.req.header('Content-Length') || '0')
+  if (contentLength > 5 * 1024 * 1024) {
+    return c.json({ error: '오디오 파일이 너무 큽니다 (최대 5MB)', text: '' }, 413)
+  }
+  await next()
+})
 
 // ─── Notion API Helper ───────────────────────────────────────────────────────
 async function notionRequest(apiKey: string, endpoint: string, method = 'GET', body?: any) {
@@ -712,6 +771,10 @@ app.post('/api/stt', async (c) => {
 app.post('/api/ai/structure', async (c) => {
   const geminiKey = c.env.GEMINI_API_KEY
   const { type, text } = await c.req.json()
+
+  // 입력 크기 제한 (10KB 이상이면 거부)
+  if (!text || typeof text !== 'string') return c.json({ error: '텍스트가 없습니다' }, 400)
+  if (text.length > 10000) return c.json({ error: '입력이 너무 깁니다 (최대 10,000자)' }, 400)
 
   let prompt = ''
   if (type === 'diary') {
