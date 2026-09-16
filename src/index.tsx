@@ -404,8 +404,7 @@ app.post('/api/notion/recover', async (c) => {
     '📔 Diary':             'diary',
   }
 
-  // 가장 오래된(첫 번째) DB만 사용
-  const databases: Record<string, string> = {}
+  // created_time 기준 오름차순 정렬 → 가장 오래된(원본) DB 우선 선택
   const allFound: Array<{key:string, id:string, title:string, created:string}> = []
 
   for (const block of childrenRes.results) {
@@ -413,14 +412,26 @@ app.post('/api/notion/recover', async (c) => {
       const dbTitle = block.child_database?.title || ''
       const key = dbTitleMap[dbTitle]
       if (key) {
-        allFound.push({ key, id: block.id.replace(/-/g,''), title: dbTitle, created: block.created_time })
-        if (!databases[key]) databases[key] = block.id.replace(/-/g,'')
+        allFound.push({ key, id: block.id.replace(/-/g,''), title: dbTitle, created: block.created_time || '' })
       }
     }
   }
 
+  // 생성 시간 오름차순 정렬 (가장 오래된 것이 앞으로)
+  allFound.sort((a, b) => a.created.localeCompare(b.created))
+
+  // 각 key별 가장 오래된 DB만 선택
+  const databases: Record<string, string> = {}
+  const selectedInfo: Array<{key:string, id:string, title:string, created:string}> = []
+  for (const item of allFound) {
+    if (!databases[item.key]) {
+      databases[item.key] = item.id
+      selectedInfo.push(item)
+    }
+  }
+
   const found = Object.keys(databases).length
-  return c.json({ success: true, databases, found, allFound, message: `${found}개 DB 복원됨` })
+  return c.json({ success: true, databases, found, allFound, selectedInfo, message: `${found}개 DB 복원됨 (가장 오래된 DB 선택)` })
 })
 
 
