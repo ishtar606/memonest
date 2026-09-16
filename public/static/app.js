@@ -4,8 +4,13 @@
 const MemoNest = {
   // ── State ──────────────────────────────────────────────────────────────────
   // ── 앱 버전/개발 로그 ─────────────────────────────────────────────────────
-  VERSION: '2.1.1',
+  VERSION: '2.1.2',
   CHANGELOG: [
+    { ver: '2.1.2', date: '2026-09-16', changes: [
+      '일정 장소: 실제 장소 입력 → Google Maps 링크로 자동 변환 (목록에서 클릭 시 지도 팝업)',
+      '일정 장소: Zoom·Meet·Teams 등 비대면 링크 감지 → 목록에서 바로 클릭 입장 가능',
+      '일정 장소 입력 시 실시간 hint 표시 (장소 확인 링크 / 비대면 링크 감지 안내)',
+    ] },
     { ver: '2.1.1', date: '2026-09-16', changes: [
       'Bug Fix: 앱 내부 DB 복원 모달 추가 (recoverFromApp) — loadTodos 에러 화면에서 바로 복원 가능',
       'Bug Fix: loadShopping/loadSchedules/loadMeetings 에 Notion 에러 응답 감지 + 복원 버튼 추가 (일관성)',
@@ -344,6 +349,73 @@ const MemoNest = {
         </div>
       </div>
     </div>`;
+  },
+
+  // ── 장소 헬퍼 ─────────────────────────────────────────────────────────────
+  // URL 여부 판별 (http/https/zoom/meet/teams 등)
+  _isUrl(str) {
+    return /^(https?:\/\/|zoom\.us|meet\.google\.com|teams\.microsoft\.com)/i.test(str.trim());
+  },
+
+  // 비대면 링크 브랜드 감지 → 아이콘+이름 반환
+  _getOnlineMeta(url) {
+    const u = url.toLowerCase();
+    if (u.includes('zoom.us') || u.includes('zoom.com')) return { icon: '📹', name: 'Zoom 참여' };
+    if (u.includes('meet.google.com')) return { icon: '🟢', name: 'Google Meet 참여' };
+    if (u.includes('teams.microsoft.com')) return { icon: '🟣', name: 'Teams 참여' };
+    if (u.includes('webex.com')) return { icon: '🔵', name: 'Webex 참여' };
+    if (u.includes('discord.com') || u.includes('discord.gg')) return { icon: '🎮', name: 'Discord 참여' };
+    if (u.includes('gather.town')) return { icon: '🏕️', name: 'Gather Town' };
+    return { icon: '🌐', name: '링크 열기' };
+  },
+
+  // 장소 문자열 → 목록 표시용 HTML 렌더
+  _renderLocationBadge(location) {
+    if (!location) return '';
+    const loc = location.trim();
+    // URL이면 비대면 링크 처리
+    if (this._isUrl(loc)) {
+      const href = loc.startsWith('http') ? loc : `https://${loc}`;
+      const meta = this._getOnlineMeta(loc);
+      return `<a href="${href}" target="_blank" rel="noopener"
+        style="font-size:12px;color:#6366f1;display:inline-flex;align-items:center;gap:4px;
+               background:rgba(99,102,241,0.08);border:1px solid rgba(99,102,241,0.2);
+               border-radius:20px;padding:2px 10px;text-decoration:none;cursor:pointer"
+        title="${href}">
+        ${meta.icon} ${meta.name}
+      </a>`;
+    }
+    // 일반 장소 → Google Maps 링크
+    const mapsUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(loc)}`;
+    return `<a href="${mapsUrl}" target="_blank" rel="noopener"
+      style="font-size:12px;color:#64748b;display:inline-flex;align-items:center;gap:4px;
+             text-decoration:none;cursor:pointer"
+      title="Google Maps에서 보기">
+      <i class="fas fa-map-marker-alt" style="color:#ef4444"></i> ${loc}
+      <i class="fas fa-external-link-alt" style="font-size:10px;opacity:0.5"></i>
+    </a>`;
+  },
+
+  // 장소 입력값 변경 시 → 확인 팝업 표시
+  onLocationInput(inputId) {
+    const val = document.getElementById(inputId)?.value?.trim();
+    if (!val) return;
+    const hint = document.getElementById(inputId + '-hint');
+    if (!hint) return;
+    if (this._isUrl(val)) {
+      const meta = this._getOnlineMeta(val);
+      hint.innerHTML = `<span style="color:#6366f1;font-size:11px">${meta.icon} 비대면 링크로 저장돼요 → 목록에서 바로 클릭 가능</span>`;
+    } else if (val.length >= 2) {
+      const mapsUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(val)}`;
+      hint.innerHTML = `<span style="color:#64748b;font-size:11px">
+        📍 실제 장소로 저장 →
+        <a href="${mapsUrl}" target="_blank" rel="noopener"
+           style="color:#ef4444;text-decoration:underline">Google Maps에서 확인</a>
+        해보세요
+      </span>`;
+    } else {
+      hint.innerHTML = '';
+    }
   },
 
   // ── 앱 내부 DB 복원 (모달 진입) ─────────────────────────────────────────
@@ -2250,7 +2322,7 @@ const MemoNest = {
           </div>
           <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
             ${datetimeRaw ? `<span style="font-size:12px;color:#475569;display:flex;align-items:center;gap:4px"><i class="fas fa-clock" style="color:var(--primary)"></i> ${datetimeDisplay}</span>` : ''}
-            ${location ? `<span style="font-size:12px;color:#64748b;display:flex;align-items:center;gap:4px"><i class="fas fa-map-marker-alt"></i> ${location}</span>` : ''}
+            ${location ? this._renderLocationBadge(location) : ''}
           </div>
           <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">
             ${category ? `<span class="tag">${category}</span>` : ''}
@@ -2296,8 +2368,10 @@ const MemoNest = {
         </div>
       </div>
       <div class="form-group">
-        <label class="form-label">장소</label>
-        <input class="form-input" id="edit-sch-location" value="${location}">
+        <label class="form-label">장소 / 비대면 링크</label>
+        <input class="form-input" id="edit-sch-location" value="${location}"
+          oninput="MemoNest.onLocationInput('edit-sch-location')">
+        <div id="edit-sch-location-hint" style="margin-top:4px;min-height:16px"></div>
       </div>
       <div class="form-group">
         <label class="form-label">메모</label>
@@ -2306,6 +2380,8 @@ const MemoNest = {
       <button class="btn btn-primary btn-block" onclick="MemoNest.saveEditSchedule('${pageId}')">
         <i class="fas fa-save"></i> 수정 저장
       </button>`, null);
+    // 기존 location 값이 있으면 hint 즉시 표시
+    if (location) setTimeout(() => this.onLocationInput('edit-sch-location'), 50);
   },
 
   async saveEditSchedule(pageId) {
@@ -2412,8 +2488,10 @@ const MemoNest = {
         </div>
       </div>
       <div class="form-group">
-        <label class="form-label">장소</label>
-        <input class="form-input" id="sch-location" placeholder="장소 (선택)">
+        <label class="form-label">장소 / 비대면 링크</label>
+        <input class="form-input" id="sch-location" placeholder="장소명 또는 Zoom·Meet 링크"
+          oninput="MemoNest.onLocationInput('sch-location')">
+        <div id="sch-location-hint" style="margin-top:4px;min-height:16px"></div>
       </div>
       <div class="form-group">
         <label class="form-label">메모</label>
