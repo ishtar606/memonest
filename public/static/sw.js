@@ -1,91 +1,81 @@
-// MemoNest Service Worker — v2.1.0
-// Cache Strategy:
-//   - App Shell (HTML/CSS/JS/fonts): Cache First (오프라인 즉시 응답)
-//   - API routes (/api/*): Network First with timeout fallback
-//   - Notion/AI calls: Network Only (데이터 정합성 필수)
+// MemoNest Service Worker — v2.1.1
+// 전략: 정적 자산(CSS/폰트 등)만 캐시, HTML과 API는 항상 네트워크 우선
+// → 앱 업데이트·데이터 불러오기 문제 방지
 
-const CACHE_NAME = 'memonest-v2.1.0';
-const OFFLINE_URL = '/';
+const CACHE_NAME = 'memonest-v2.1.1';
 
-// 앱 Shell: 오프라인에서도 UI를 표시할 수 있는 정적 자산
-const APP_SHELL = [
-  '/',
-  '/static/app.js',
-  '/static/style.css',
-  '/static/manifest.json',
-  'https://cdn.tailwindcss.com',
+// 캐시할 정적 자산 (버전 변경 없는 외부 리소스만)
+const STATIC_ASSETS = [
   'https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.4.0/css/all.min.css',
 ];
 
-// ── Install: App Shell 선제 캐시 ──────────────────────────────────────────
+// ── Install: 외부 정적 자산만 선제 캐시 ──────────────────────────────────
 self.addEventListener('install', event => {
   event.waitUntil(
-    caches.open(CACHE_NAME).then(cache => {
-      // 외부 CDN은 실패해도 설치 중단 안 함 (개별 시도)
-      const localShell = ['/', '/static/app.js', '/static/style.css', '/static/manifest.json', '/static/sw.js'];
-      return cache.addAll(localShell).catch(() => {});
-    }).then(() => self.skipWaiting())
+    caches.open(CACHE_NAME)
+      .then(cache => cache.addAll(STATIC_ASSETS).catch(() => {}))
+      .then(() => self.skipWaiting())
   );
 });
 
-// ── Activate: 이전 캐시 정리 ──────────────────────────────────────────────
+// ── Activate: 이전 버전 캐시 모두 삭제 ───────────────────────────────────
 self.addEventListener('activate', event => {
   event.waitUntil(
-    caches.keys().then(keys =>
-      Promise.all(
+    caches.keys()
+      .then(keys => Promise.all(
         keys.filter(key => key !== CACHE_NAME).map(key => caches.delete(key))
-      )
-    ).then(() => self.clients.claim())
+      ))
+      .then(() => self.clients.claim())
   );
 });
 
-// ── Fetch: 요청 유형별 캐시 전략 ──────────────────────────────────────────
+// ── Fetch: 요청 유형별 분기 ───────────────────────────────────────────────
 self.addEventListener('fetch', event => {
   const { request } = event;
   const url = new URL(request.url);
 
-  // 1) POST/PATCH/DELETE → 항상 네트워크 (캐시 불가)
+  // POST/PATCH/DELETE → 항상 네트워크 (SW 개입 없음)
   if (request.method !== 'GET') return;
 
-  // 2) API routes → Network First (오프라인 시 캐시 폴백)
-  if (url.pathname.startsWith('/api/')) {
-    event.respondWith(networkFirstWithFallback(request));
+  // 루트 HTML(/) → 항상 네트워크 (최신 앱 보장)
+  if (url.pathname === '/' || url.pathname === '') return;
+
+  // API 호출 → 항상 네트워크 (데이터 정합성 필수)
+  if (url.pathname.startsWith('/api/')) return;
+
+  // app.js / sw.js 자체 → 항상 네트워크 (최신 코드 보장)
+  if (url.pathname.startsWith('/static/app.js') || url.pathname.startsWith('/static/sw.js')) return;
+
+  // 외부 CDN 정적 자산 → Cache First (네트워크 비용 절감)
+  if (url.origin !== self.location.origin) {
+    event.respondWith(cacheFirstExternalAsset(request));
     return;
   }
 
-  // 3) App Shell 및 정적 자산 → Cache First
-  event.respondWith(cacheFirstWithNetworkFallback(request));
+  // 내부 정적 자산(CSS 등) → Network First (업데이트 반영)
+  event.respondWith(networkFirstStaticAsset(request));
 });
 
-// Cache First: 캐시 → 없으면 네트워크 후 캐시 저장
-async function cacheFirstWithNetworkFallback(request) {
+// Cache First (외부 CDN 자산용)
+async function cacheFirstExternalAsset(request) {
   const cached = await caches.match(request);
   if (cached) return cached;
   try {
     const response = await fetch(request);
-    if (response.ok && response.type !== 'opaque') {
+    if (response.ok) {
       const cache = await caches.open(CACHE_NAME);
       cache.put(request, response.clone());
     }
     return response;
   } catch {
-    // 오프라인 + 캐시 없음: 루트("/") 캐시 반환
-    const fallback = await caches.match(OFFLINE_URL);
-    if (fallback) return fallback;
-    return new Response('<h2 style="font-family:sans-serif;text-align:center;margin-top:40px">📵 오프라인 상태입니다</h2>', {
-      headers: { 'Content-Type': 'text/html; charset=utf-8' }
-    });
+    return new Response('', { status: 503 });
   }
 }
 
-// Network First: 네트워크 3초 타임아웃 → 캐시 폴백
-async function networkFirstWithFallback(request) {
-  const timeoutMs = 3000;
+// Network First (내부 정적 자산용, 오프라인 폴백 있음)
+async function networkFirstStaticAsset(request) {
   try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    const response = await fetch(request, { signal: controller.signal });
-    clearTimeout(timer);
+    const response = await fetch(request);
     if (response.ok) {
       const cache = await caches.open(CACHE_NAME);
       cache.put(request, response.clone());
@@ -93,17 +83,6 @@ async function networkFirstWithFallback(request) {
     return response;
   } catch {
     const cached = await caches.match(request);
-    if (cached) return cached;
-    return new Response(JSON.stringify({ error: '오프라인 상태입니다', offline: true }), {
-      status: 503,
-      headers: { 'Content-Type': 'application/json; charset=utf-8' }
-    });
+    return cached || new Response('', { status: 503 });
   }
 }
-
-// ── 백그라운드 Sync (향후 확장용 플레이스홀더) ────────────────────────────
-self.addEventListener('sync', event => {
-  if (event.tag === 'sync-pending') {
-    // TODO: 오프라인 중 저장된 큐를 온라인 복귀 시 일괄 처리
-  }
-});
