@@ -4,8 +4,13 @@
 const MemoNest = {
   // ── State ──────────────────────────────────────────────────────────────────
   // ── 앱 버전/개발 로그 ─────────────────────────────────────────────────────
-  VERSION: '2.1.4',
+  VERSION: '2.2.0',
   CHANGELOG: [
+    { ver: '2.2.0', date: '2026-09-16', changes: [
+      'Google Calendar 연동: OAuth 2.0 인증 + 일정 자동 동기화',
+      '일정 탭: 구글캘린더 연동 버튼 + 개별/전체 내보내기',
+      '토큰 자동 갱신 (refresh_token 기반, 만료 5분 전 갱신)',
+    ] },
     { ver: '2.1.4', date: '2026-09-16', changes: [
       'Bug Fix: 비대면링크 포함 일정 편집버튼 안눌리는 문제 — onclick 인라인 특수문자 깨짐 → data-sid + _scheduleCache 방식으로 근본 해결',
       '장소 자동 파싱: "SKT A타워 3층 회의실 A" → Maps는 "SKT A타워"만 검색, "3층 회의실 A"는 목록에 인라인 표시',
@@ -57,6 +62,7 @@ const MemoNest = {
     recordingTimer: null,
     recordingSeconds: 0,
     currentUser: null,
+    googleCalTokens: null,  // { access_token, refresh_token, expires_in, issued_at }
     sttSettings: {
       enabled: true,
       language: 'ko',
@@ -76,8 +82,11 @@ const MemoNest = {
     this.state.dbIds = this.load('dbIds', {});
     this.state.isSetupDone = Object.keys(this.state.dbIds).length === 7;
     this.state.sttSettings = this.load('sttSettings', this.state.sttSettings);
+    this.state.googleCalTokens = this.load('googleCalTokens', null);
     // Genspark 사용자 정보 로드 (배포 환경)
     await this.loadCurrentUser();
+    // Google OAuth 콜백 메시지 수신 리스너 등록
+    window.addEventListener('message', (e) => this._onOAuthMessage(e));
     this.render();
   },
 
@@ -2308,12 +2317,181 @@ const MemoNest = {
   },
 
   // ══════════════════════════════════════════════════════════════════════════
+  // GOOGLE CALENDAR
+  // ══════════════════════════════════════════════════════════════════════════
+
+  // OAuth 팝업 창에서 메시지 수신
+  _onOAuthMessage(e) {
+    if (e.data?.type === 'GCAL_AUTH_SUCCESS') {
+      const t = e.data.tokens;
+      this.state.googleCalTokens = t;
+      this.save('googleCalTokens', t);
+      this.toast('✅ Google Calendar 연동 완료!', 'success', 4000);
+      // 일정 탭이 열려있으면 캘린더 버튼 갱신
+      if (this.state.currentModule === 'schedule') this.render();
+    } else if (e.data?.type === 'GCAL_AUTH_ERROR') {
+      this.toast('❌ Google 인증 실패: ' + (e.data.error || '알 수 없는 오류'), 'error');
+    }
+  },
+
+  // Google Calendar 연동 시작 (팝업)
+  async connectGoogleCalendar() {
+    try {
+      const res = await fetch('/api/calendar/auth-url');
+      const data = await res.json();
+      if (data.error) { this.toast('인증 URL 생성 실패: ' + data.error, 'error'); return; }
+      const popup = window.open(data.url, 'gcal_auth', 'width=500,height=650,scrollbars=yes');
+      if (!popup) this.toast('팝업이 차단됐어요. 팝업 허용 후 다시 시도해주세요.', 'error');
+    } catch(e) { this.toast('오류: ' + e.message, 'error'); }
+  },
+
+  // 연동 해제
+  disconnectGoogleCalendar() {
+    this.state.googleCalTokens = null;
+    this.save('googleCalTokens', null);
+    this.toast('Google Calendar 연동을 해제했어요.', 'info');
+    if (this.state.currentModule === 'schedule') this.render();
+  },
+
+  // Notion 일정 → Google Calendar 이벤트 변환
+  _scheduleToGCalEvent(sch) {
+    const { title, datetime, location, category, reminder, memo } = sch;
+    const event = {
+      summary: title || '제목 없음',
+      description: [
+        memo ? `📝 메모: ${memo}` : '',
+        category ? `🏷️ 카테고리: ${category}` : '',
+        '📌 MemoNest에서 동기화',
+      ].filter(Boolean).join('\n'),
+    };
+    // 날짜/시간 설정
+    if (datetime) {
+      const dt = new Date(datetime);
+      event.start = { dateTime: dt.toISOString(), timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone };
+      event.end   = { dateTime: new Date(dt.getTime() + 60*60*1000).toISOString(), timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone };
+    } else {
+      const today = new Date().toISOString().split('T')[0];
+      event.start = { date: today };
+      event.end   = { date: today };
+    }
+    // 장소
+    if (location) {
+      const { place, link } = this._parseLocation(location);
+      if (place) event.location = place;
+      if (link) event.description += `\n🔗 ${link}`;
+    }
+    // 알림
+    if (reminder && reminder !== '없음') {
+      const minutesMap = { '10분 전': 10, '1시간 전': 60, '1일 전': 1440 };
+      const min = minutesMap[reminder] || 10;
+      event.reminders = { useDefault: false, overrides: [{ method: 'popup', minutes: min }] };
+    }
+    return event;
+  },
+
+  // 단일 일정 → Google Calendar 등록
+  async addToGoogleCalendar(sid) {
+    const sch = this._scheduleCache?.[sid];
+    if (!sch) { this.toast('일정 데이터를 찾을 수 없어요.', 'error'); return; }
+    const tokens = this.state.googleCalTokens;
+    if (!tokens) { this.toast('먼저 Google Calendar를 연동해주세요.', 'error'); return; }
+
+    try {
+      const res = await fetch('/api/calendar/events', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          accessToken: tokens.access_token,
+          refreshToken: tokens.refresh_token,
+          issuedAt: tokens.issued_at,
+          expiresIn: tokens.expires_in,
+          event: this._scheduleToGCalEvent(sch),
+        })
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      if (data.newTokens) { this.state.googleCalTokens = { ...tokens, ...data.newTokens }; this.save('googleCalTokens', this.state.googleCalTokens); }
+      this.toast(`📅 "${sch.title}" Google Calendar에 추가했어요!`, 'success', 4000);
+    } catch(e) {
+      if (e.message?.includes('401')) { this.toast('구글 인증이 만료됐어요. 다시 연동해주세요.', 'error'); this.state.googleCalTokens = null; this.save('googleCalTokens', null); }
+      else this.toast('캘린더 등록 실패: ' + e.message, 'error');
+    }
+  },
+
+  // 전체 일정 → Google Calendar 일괄 등록
+  async syncAllToGoogleCalendar() {
+    const tokens = this.state.googleCalTokens;
+    if (!tokens) { this.toast('먼저 Google Calendar를 연동해주세요.', 'error'); return; }
+    const cache = this._scheduleCache;
+    if (!cache || !Object.keys(cache).length) { this.toast('동기화할 일정이 없어요.', 'info'); return; }
+
+    const events = Object.values(cache).map(s => this._scheduleToGCalEvent(s));
+    this.toast(`⏳ ${events.length}개 일정을 Google Calendar에 등록 중...`, 'info', 5000);
+
+    try {
+      const res = await fetch('/api/calendar/bulk', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          accessToken: tokens.access_token,
+          refreshToken: tokens.refresh_token,
+          issuedAt: tokens.issued_at,
+          expiresIn: tokens.expires_in,
+          events,
+        })
+      });
+      const data = await res.json();
+      if (data.newTokens) { this.state.googleCalTokens = { ...tokens, ...data.newTokens }; this.save('googleCalTokens', this.state.googleCalTokens); }
+      this.toast(`✅ ${data.created}개 등록 완료 / ${data.failed}개 실패`, 'success', 5000);
+      // 실패 항목 상세 표시
+      const failed = (data.results || []).filter(r => !r.success);
+      if (failed.length) console.warn('캘린더 등록 실패 항목:', failed);
+    } catch(e) {
+      this.toast('일괄 등록 실패: ' + e.message, 'error');
+    }
+  },
+
+  // 캘린더 연동 상태 배너 HTML
+  _renderGCalBanner() {
+    const t = this.state.googleCalTokens;
+    const isConnected = !!(t?.access_token);
+    if (isConnected) {
+      return `
+      <div style="display:flex;align-items:center;gap:10px;padding:10px 14px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:12px;margin-bottom:10px">
+        <span style="font-size:18px">📅</span>
+        <div style="flex:1;min-width:0">
+          <div style="font-size:13px;font-weight:600;color:#16a34a">Google Calendar 연동됨</div>
+          <div style="font-size:11px;color:#6b7280">일정 카드의 📅 버튼으로 개별 추가, 아래 버튼으로 전체 동기화</div>
+        </div>
+        <button onclick="MemoNest.syncAllToGoogleCalendar()" style="white-space:nowrap;background:#16a34a;color:white;border:none;border-radius:8px;padding:6px 12px;font-size:12px;font-weight:600;cursor:pointer">
+          <i class="fas fa-sync-alt"></i> 전체 동기화
+        </button>
+        <button onclick="MemoNest.disconnectGoogleCalendar()" style="background:none;border:1px solid #e2e8f0;border-radius:8px;padding:6px 10px;font-size:11px;color:#6b7280;cursor:pointer" title="연동 해제">
+          <i class="fas fa-unlink"></i>
+        </button>
+      </div>`;
+    } else {
+      return `
+      <div style="display:flex;align-items:center;gap:10px;padding:10px 14px;background:#fafafa;border:1px dashed #d1d5db;border-radius:12px;margin-bottom:10px">
+        <span style="font-size:18px">📅</span>
+        <div style="flex:1;min-width:0">
+          <div style="font-size:13px;font-weight:600;color:#374151">Google Calendar 연동</div>
+          <div style="font-size:11px;color:#6b7280">일정을 Google Calendar에 자동으로 추가할 수 있어요</div>
+        </div>
+        <button onclick="MemoNest.connectGoogleCalendar()" style="white-space:nowrap;background:white;border:1.5px solid #4285f4;border-radius:8px;padding:6px 12px;font-size:12px;font-weight:600;color:#4285f4;cursor:pointer;display:flex;align-items:center;gap:6px">
+          <svg width="14" height="14" viewBox="0 0 24 24" style="flex-shrink:0"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>
+          Google 연동
+        </button>
+      </div>`;
+    }
+  },
+
+  // ══════════════════════════════════════════════════════════════════════════
   // SCHEDULE
   // ══════════════════════════════════════════════════════════════════════════
   renderSchedule() {
     const gmtStr = this.getGMTOffsetStr();
     const tzName = this.getTimezoneName();
     return `
+    ${this._renderGCalBanner()}
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;padding:10px 14px;background:rgba(99,102,241,0.06);border-radius:12px;border:1px solid rgba(99,102,241,0.15)">
       <span style="font-size:16px">🌐</span>
       <div>
@@ -2382,12 +2560,16 @@ const MemoNest = {
         const badge = isUpcoming ? `<span style="background:#fef3c7;color:#d97706;font-size:11px;padding:2px 8px;border-radius:20px;font-weight:600">⏰ 오늘 예정</span>`
           : isPast ? `<span style="background:#f1f5f9;color:#94a3b8;font-size:11px;padding:2px 8px;border-radius:20px">지난 일정</span>` : '';
 
+        const gcalBtn = this.state.googleCalTokens
+          ? `<button data-sid="${s.id}" onclick="MemoNest.addToGoogleCalendar(this.dataset.sid)" style="background:none;border:1px solid #bfdbfe;border-radius:6px;padding:3px 7px;cursor:pointer;font-size:11px;color:#3b82f6" title="Google Calendar에 추가"><i class="fas fa-calendar-plus"></i></button>`
+          : '';
         return `
         <div class="card" style="border-color:${borderColor}">
           <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px">
             <div style="font-size:15px;font-weight:600;flex:1;min-width:0">📅 ${title}</div>
             <div style="display:flex;align-items:center;gap:4px;flex-shrink:0">
               ${badge}
+              ${gcalBtn}
               <button data-sid="${s.id}" onclick="MemoNest.showEditScheduleById(this.dataset.sid)"
                 style="background:none;border:1px solid #e2e8f0;border-radius:6px;padding:3px 7px;cursor:pointer;font-size:11px;color:#64748b" title="수정">
                 <i class="fas fa-pen"></i>

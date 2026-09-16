@@ -6,6 +6,8 @@ type Bindings = {
   NOTION_API_KEY: string
   GEMINI_API_KEY: string
   GROQ_API_KEY: string
+  GOOGLE_CLIENT_ID: string
+  GOOGLE_CLIENT_SECRET: string
 }
 
 const app = new Hono<{ Bindings: Bindings }>()
@@ -984,6 +986,188 @@ app.post('/api/ai/structure', async (c) => {
 
 // ─── Settings API (DB IDs 저장/조회) ─────────────────────────────────────────
 // DB IDs는 클라이언트 localStorage에 저장하는 방식 사용
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// GOOGLE CALENDAR OAUTH 2.0
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const GOOGLE_SCOPES = 'https://www.googleapis.com/auth/calendar.events'
+const REDIRECT_URI_PROD = 'https://16bf51cf-4855-4db9-a334-aa07e29f4b47.vip.gensparksite.com/api/calendar/callback'
+
+// ─── Google OAuth: 인증 URL 생성 ──────────────────────────────────────────────
+app.get('/api/calendar/auth-url', (c) => {
+  const clientId = c.env.GOOGLE_CLIENT_ID
+  if (!clientId) return c.json({ error: 'GOOGLE_CLIENT_ID not configured' }, 500)
+
+  const params = new URLSearchParams({
+    client_id: clientId,
+    redirect_uri: REDIRECT_URI_PROD,
+    response_type: 'code',
+    scope: GOOGLE_SCOPES,
+    access_type: 'offline',    // refresh_token 발급
+    prompt: 'consent',         // 항상 동의화면 → refresh_token 재발급 보장
+    state: 'memonest_cal',
+  })
+  const url = `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`
+  return c.json({ url })
+})
+
+// ─── Google OAuth: 콜백 처리 + token 저장 (localStorage로 전달) ───────────────
+app.get('/api/calendar/callback', async (c) => {
+  const code = c.req.query('code')
+  const error = c.req.query('error')
+
+  if (error || !code) {
+    return c.html(`<script>
+      window.opener?.postMessage({type:'GCAL_AUTH_ERROR', error:'${error || 'no_code'}'}, '*');
+      window.close();
+    </script>`)
+  }
+
+  const clientId = c.env.GOOGLE_CLIENT_ID
+  const clientSecret = c.env.GOOGLE_CLIENT_SECRET
+
+  // code → tokens 교환
+  const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      code,
+      client_id: clientId,
+      client_secret: clientSecret,
+      redirect_uri: REDIRECT_URI_PROD,
+      grant_type: 'authorization_code',
+    }).toString(),
+  })
+  const tokens: any = await tokenRes.json()
+
+  if (tokens.error) {
+    return c.html(`<script>
+      window.opener?.postMessage({type:'GCAL_AUTH_ERROR', error:'${tokens.error}'}, '*');
+      window.close();
+    </script>`)
+  }
+
+  // 토큰을 opener(부모창)로 전달 → localStorage에 저장
+  return c.html(`<!DOCTYPE html><html><head><title>인증 완료</title></head><body>
+    <p style="font-family:sans-serif;text-align:center;padding:40px">✅ Google Calendar 연동 완료! 창이 자동으로 닫힙니다.</p>
+    <script>
+      const tokens = ${JSON.stringify({
+        access_token: tokens.access_token,
+        refresh_token: tokens.refresh_token || null,
+        expires_in: tokens.expires_in || 3600,
+        issued_at: Date.now(),
+      })};
+      window.opener?.postMessage({type:'GCAL_AUTH_SUCCESS', tokens}, '*');
+      setTimeout(() => window.close(), 1500);
+    </script>
+  </body></html>`)
+})
+
+// ─── Google token refresh helper ──────────────────────────────────────────────
+async function refreshGoogleToken(clientId: string, clientSecret: string, refreshToken: string) {
+  const res = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      client_id: clientId,
+      client_secret: clientSecret,
+      refresh_token: refreshToken,
+      grant_type: 'refresh_token',
+    }).toString(),
+  })
+  return res.json() as Promise<any>
+}
+
+// ─── Google Calendar: 이벤트 생성 API ─────────────────────────────────────────
+app.post('/api/calendar/events', async (c) => {
+  const body = await c.req.json()
+  const { accessToken, refreshToken, issuedAt, expiresIn, event } = body
+
+  const clientId = c.env.GOOGLE_CLIENT_ID
+  const clientSecret = c.env.GOOGLE_CLIENT_SECRET
+  if (!clientId || !clientSecret) return c.json({ error: 'Google credentials not configured' }, 500)
+
+  // access_token 만료 여부 확인 (만료 5분 전 갱신)
+  let token = accessToken
+  let newTokens: any = null
+  const now = Date.now()
+  const expiresAt = (issuedAt || 0) + (expiresIn || 3600) * 1000
+  if (now > expiresAt - 5 * 60 * 1000) {
+    if (!refreshToken) return c.json({ error: 'Token expired and no refresh_token. Please re-authenticate.' }, 401)
+    const refreshed = await refreshGoogleToken(clientId, clientSecret, refreshToken)
+    if (refreshed.error) return c.json({ error: `Token refresh failed: ${refreshed.error}` }, 401)
+    token = refreshed.access_token
+    newTokens = {
+      access_token: refreshed.access_token,
+      expires_in: refreshed.expires_in || 3600,
+      issued_at: Date.now(),
+      refresh_token: refreshToken, // refresh_token은 재발급 안되므로 유지
+    }
+  }
+
+  // Google Calendar API 이벤트 생성
+  const calRes = await fetch('https://www.googleapis.com/calendar/v3/calendars/primary/events', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(event),
+  })
+  const calData: any = await calRes.json()
+
+  if (calData.error) return c.json({ error: calData.error.message, details: calData }, 400)
+
+  return c.json({
+    success: true,
+    eventId: calData.id,
+    htmlLink: calData.htmlLink,
+    newTokens, // null이면 갱신 불필요, 있으면 클라이언트가 localStorage 업데이트
+  })
+})
+
+// ─── Google Calendar: 일정 일괄 등록 (Notion 일정 전체) ──────────────────────
+app.post('/api/calendar/bulk', async (c) => {
+  const body = await c.req.json()
+  const { accessToken, refreshToken, issuedAt, expiresIn, events } = body
+
+  const clientId = c.env.GOOGLE_CLIENT_ID
+  const clientSecret = c.env.GOOGLE_CLIENT_SECRET
+  if (!clientId || !clientSecret) return c.json({ error: 'Google credentials not configured' }, 500)
+
+  // token 갱신 체크
+  let token = accessToken
+  let newTokens: any = null
+  const now = Date.now()
+  const expiresAt = (issuedAt || 0) + (expiresIn || 3600) * 1000
+  if (now > expiresAt - 5 * 60 * 1000) {
+    if (!refreshToken) return c.json({ error: 'Token expired. Please re-authenticate.' }, 401)
+    const refreshed = await refreshGoogleToken(clientId, clientSecret, refreshToken)
+    if (refreshed.error) return c.json({ error: `Token refresh failed: ${refreshed.error}` }, 401)
+    token = refreshed.access_token
+    newTokens = { access_token: refreshed.access_token, expires_in: refreshed.expires_in || 3600, issued_at: Date.now(), refresh_token: refreshToken }
+  }
+
+  // 이벤트 순차 등록 (Google API rate limit 배려)
+  const results: any[] = []
+  for (const event of (events || [])) {
+    try {
+      const res = await fetch('https://www.googleapis.com/calendar/v3/calendars/primary/events', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(event),
+      })
+      const data: any = await res.json()
+      results.push({ success: !data.error, eventId: data.id, htmlLink: data.htmlLink, title: event.summary, error: data.error?.message })
+    } catch (e: any) {
+      results.push({ success: false, title: event.summary, error: e.message })
+    }
+  }
+
+  const successCount = results.filter(r => r.success).length
+  return c.json({ success: true, total: events.length, created: successCount, failed: events.length - successCount, results, newTokens })
+})
 
 // ─── Main App HTML ─────────────────────────────────────────────────────────────
 app.get('*', (c) => {
