@@ -1093,17 +1093,6 @@ app.post('/api/ai/structure', async (c) => {
   return c.json(parsed)
 })
 
-// ─── (임시) Gemini 진단 라우트 — 키 노출 없이 상태만 보고 ────────────────────
-// 원인 파악 후 제거 예정. 키 값 자체는 반환하지 않는다.
-app.get('/api/ai/debug', async (c) => {
-  const key = c.env.GEMINI_API_KEY || ''
-  const info: any = { hasKey: !!key, keyLen: key.length }
-  if (!key) return c.json({ ...info, note: 'GEMINI_API_KEY 미주입' })
-  // 실제 헬퍼 경로(재시도+폴백)로 테스트
-  const out = await geminiRequest(key, 'ping. reply with the single word: pong')
-  return c.json({ ...info, result: out, ok: !!out })
-})
-
 // ─── Settings API (DB IDs 저장/조회) ─────────────────────────────────────────
 // DB IDs는 클라이언트 localStorage에 저장하는 방식 사용
 
