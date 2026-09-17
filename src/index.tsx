@@ -121,7 +121,8 @@ async function geminiRequest(apiKey: string, prompt: string): Promise<string> {
     const controller = new AbortController()
     const timeoutId = setTimeout(() => controller.abort(), 25000) // 25초 타임아웃
     const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`,
+      // gemini-1.5-flash 는 v1beta에서 404(deprecated). 항상 최신 flash로 매핑되는 별칭 사용.
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=${apiKey}`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
