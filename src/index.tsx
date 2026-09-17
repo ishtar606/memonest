@@ -773,6 +773,21 @@ app.get('/api/meetings', async (c) => {
   return c.json(data)
 })
 
+// 회의록 수정
+app.patch('/api/meetings/:pageId', async (c) => {
+  const apiKey = c.env.NOTION_API_KEY
+  const pageId = c.req.param('pageId')
+  const body = await c.req.json()
+  const properties: any = {}
+  if (body.title) properties['회의 제목'] = { title: [{ text: { content: body.title } }] }
+  if (body.date) properties['날짜'] = { date: { start: body.date } }
+  if (body.client !== undefined) properties['고객사/프로젝트'] = { rich_text: body.client ? [{ text: { content: body.client } }] : [] }
+  if (body.summary !== undefined) properties['요약'] = { rich_text: body.summary ? [{ text: { content: body.summary.slice(0, 2000) } }] : [] }
+  if (body.actions !== undefined) properties['액션 아이템'] = { rich_text: body.actions ? [{ text: { content: body.actions.slice(0, 2000) } }] : [] }
+  const data = await notionRequest(apiKey, `/pages/${pageId}`, 'PATCH', { properties })
+  return c.json(data)
+})
+
 // ─── Shopping List API ────────────────────────────────────────────────────────
 app.post('/api/shopping', async (c) => {
   const apiKey = c.env.NOTION_API_KEY
@@ -860,7 +875,7 @@ app.patch('/api/schedules/:pageId', async (c) => {
   const body = await c.req.json()
   const properties: any = {}
   if (body.title) properties['일정 제목'] = { title: [{ text: { content: body.title } }] }
-  if (body.datetime) properties['날짜/시간'] = { date: { start: body.datetime } }
+  if (body.datetime) properties['날짜/시간'] = { date: { start: body.datetime, end: body.endDatetime || null } }
   if (body.location !== undefined) properties['장소'] = { rich_text: body.location ? [{ text: { content: body.location } }] : [] }
   if (body.category) properties['카테고리'] = { select: { name: body.category } }
   if (body.reminder) properties['알림'] = { select: { name: body.reminder } }
@@ -953,11 +968,11 @@ app.get('/api/novels', async (c) => {
 // ─── Schedule API ─────────────────────────────────────────────────────────────
 app.post('/api/schedules', async (c) => {
   const apiKey = c.env.NOTION_API_KEY
-  const { dbId, title, datetime, location, category, reminder, memo } = await c.req.json()
+  const { dbId, title, datetime, endDatetime, location, category, reminder, memo } = await c.req.json()
 
   const properties: any = {
     '일정 제목': { title: [{ text: { content: title } }] },
-    '날짜/시간': { date: { start: datetime } },
+    '날짜/시간': { date: { start: datetime, end: endDatetime || null } },
     '카테고리': { select: { name: category || '기타' } },
   }
   if (location) properties['장소'] = { rich_text: [{ text: { content: location } }] }

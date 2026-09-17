@@ -4,8 +4,16 @@
 const MemoNest = {
   // ── State ──────────────────────────────────────────────────────────────────
   // ── 앱 버전/개발 로그 ─────────────────────────────────────────────────────
-  VERSION: '2.3.0',
+  VERSION: '2.4.0',
   CHANGELOG: [
+    { ver: '2.4.0', date: '2026-09-17', changes: [
+      '버그수정: 일정→회의록 저장 후 회의록 리스트 즉시 갱신 (모듈 분기 처리)',
+      '버그수정: scheduleId/client 있으면 노션 저장 허용 (빈값 조건 완화)',
+      '버그수정: 회의록 카드에 ✏️ 수정 버튼 추가 + PATCH /api/meetings/:pageId',
+      '일정등록/수정 화면: 시작시간 + 종료시간 입력 필드 2분할 추가',
+      '일정관리 화면 2분할: 왼쪽 일/주/월 캘린더 + 오른쪽 일정 리스트뷰',
+      '카테고리별 파스텔 색상 구분 + fadeSlide 전환 애니메이션',
+    ] },
     { ver: '2.3.0', date: '2026-09-17', changes: [
       '회의록 완전 개편: 리스트뷰 메인 + 팝업 작성 UI',
       '일정-회의록 연동: 회의 카테고리 일정 → 회의록 등록가능/완료 구분 표시',
@@ -1611,7 +1619,8 @@ const MemoNest = {
     const manualNotes = document.getElementById('meeting-notes')?.value || '';
     const scheduleId = document.getElementById('meeting-linked-sid')?.value || '';
 
-    if (!transcript && !manualNotes) {
+    // 최소 하나 이상 입력돼야 함 — 단, 일정연동이면 제목만 있어도 OK
+    if (!transcript && !manualNotes && !scheduleId && !client) {
       this.toast('녹음하거나 메모를 입력해주세요', 'error'); return;
     }
 
@@ -1623,7 +1632,14 @@ const MemoNest = {
     try {
       const res = await fetch('/api/meetings', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ dbId: this.state.dbIds.meeting, transcript, manualNotes, date, client, scheduleId })
+        body: JSON.stringify({
+          dbId: this.state.dbIds.meeting,
+          transcript: transcript || '',
+          manualNotes: manualNotes || (client ? `${client} 회의` : '회의록'),
+          date: date || new Date().toISOString().split('T')[0],
+          client: client || '',
+          scheduleId: scheduleId || ''
+        })
       });
 
       if (!res.ok) {
@@ -1634,7 +1650,12 @@ const MemoNest = {
       const data = await res.json();
       this.toast('🎉 회의록이 노션에 저장됐어요!', 'success');
 
-      // 저장 완료 결과 표시
+      // scheduleId가 있으면 연동 완료 세트 업데이트
+      if (scheduleId) {
+        if (!this._meetingScheduleIds) this._meetingScheduleIds = new Set();
+        this._meetingScheduleIds.add(scheduleId);
+      }
+
       if (resultEl && data.structured) {
         resultEl.style.display = 'block';
         resultEl.innerHTML = `
@@ -1647,13 +1668,20 @@ const MemoNest = {
       if (btn) {
         btn.innerHTML = '<i class="fas fa-check"></i> 저장 완료';
         btn.style.background = '#16a34a';
+        btn.disabled = false;
       }
 
-      // 2초 후 모달 닫기 & 리스트 새로고침
+      // 모달 닫기 & 현재 화면 리프레시
       setTimeout(() => {
         document.getElementById('app-modal')?.remove();
-        this.loadMeetings();
-      }, 1800);
+        // 회의록 탭이 열려있으면 리스트 새로고침, 일정 탭이면 연동 섹션 갱신
+        if (this.state.currentModule === 'meeting') {
+          this.loadMeetings();
+        } else if (this.state.currentModule === 'schedule') {
+          // 일정 탭에서 연동 섹션만 업데이트 (전체 재렌더 없이)
+          this._renderMeetingScheduleLinks();
+        }
+      }, 1500);
 
     } catch (e) {
       this.toast('저장 실패: ' + e.message, 'error');
@@ -1692,6 +1720,21 @@ const MemoNest = {
       this._meetingScheduleIds = new Set(
         results.map(m => m.properties?.['일정 ID']?.rich_text?.[0]?.text?.content || '').filter(Boolean)
       );
+
+      // 회의록 캐시 저장 (수정 시 사용)
+      this._meetingCache = {};
+      results.forEach(m => {
+        const props = m.properties;
+        this._meetingCache[m.id] = {
+          title:   props['회의 제목']?.title?.[0]?.text?.content || '',
+          date:    props['날짜']?.date?.start || '',
+          client:  props['고객사/프로젝트']?.rich_text?.[0]?.text?.content || '',
+          summary: props['요약']?.rich_text?.[0]?.text?.content || '',
+          actions: props['액션 아이템']?.rich_text?.[0]?.text?.content || '',
+          tags:    props['태그']?.multi_select?.map(t => t.name) || [],
+          sid:     props['일정 ID']?.rich_text?.[0]?.text?.content || '',
+        };
+      });
       // 연동 섹션 다시 렌더 (연동 완료 상태 반영)
       await this._renderMeetingScheduleLinks();
 
@@ -1730,6 +1773,9 @@ const MemoNest = {
                 ${tags.length ? `<div style="display:flex;gap:4px;flex-wrap:wrap">${tags.map(t=>`<span class="tag" style="font-size:11px">${t}</span>`).join('')}</div>` : ''}
               </div>
               <div style="display:flex;gap:4px;flex-shrink:0;margin-left:8px">
+                <button data-mid="${m.id}" onclick="MemoNest.showEditMeetingModal(this.dataset.mid)"
+                  style="background:none;border:1px solid #e2e8f0;border-radius:6px;padding:4px 8px;cursor:pointer;font-size:11px;color:#64748b;display:flex;align-items:center;gap:3px"
+                  title="수정"><i class="fas fa-pen"></i></button>
                 <a href="${notionUrl}" target="_blank"
                   style="background:none;border:1px solid #e2e8f0;border-radius:6px;padding:4px 8px;cursor:pointer;font-size:11px;color:#6366f1;text-decoration:none;display:flex;align-items:center;gap:3px"
                   title="노션에서 보기"><i class="fas fa-external-link-alt"></i></a>
@@ -1739,6 +1785,65 @@ const MemoNest = {
         }).join('')}`;
     } catch (e) {
       el.innerHTML = '<p style="color:#ef4444;text-align:center;padding:20px">로드 실패: ' + e.message + '</p>';
+    }
+  },
+
+  // 회의록 수정 모달
+  showEditMeetingModal(mid) {
+    const d = this._meetingCache?.[mid];
+    if (!d) { this.toast('회의록 데이터를 찾을 수 없어요. 새로고침 후 시도해주세요.', 'error'); return; }
+
+    this.showModal('✏️ 회의록 수정', `
+      <div class="form-group">
+        <label class="form-label">회의 제목 *</label>
+        <input class="form-input" id="edit-mtg-title" value="${d.title}">
+      </div>
+      <div class="form-group">
+        <label class="form-label">날짜</label>
+        <input class="form-input" type="date" id="edit-mtg-date" value="${d.date}">
+      </div>
+      <div class="form-group">
+        <label class="form-label">고객사 / 프로젝트명</label>
+        <input class="form-input" id="edit-mtg-client" value="${d.client}">
+      </div>
+      <div class="form-group">
+        <label class="form-label">요약</label>
+        <textarea class="form-textarea" id="edit-mtg-summary" rows="3" style="min-height:60px">${d.summary}</textarea>
+      </div>
+      <div class="form-group">
+        <label class="form-label">액션 아이템 (줄바꿈으로 구분)</label>
+        <textarea class="form-textarea" id="edit-mtg-actions" rows="3" style="min-height:60px">${d.actions}</textarea>
+      </div>
+    `, () => this._doEditMeeting(mid));
+  },
+
+  async _doEditMeeting(mid) {
+    const title = document.getElementById('edit-mtg-title')?.value?.trim();
+    if (!title) { this.toast('제목을 입력해주세요', 'error'); return; }
+
+    const btn = document.getElementById('modal-confirm-btn');
+    if (btn) { btn.textContent = '저장 중...'; btn.disabled = true; }
+
+    try {
+      const res = await fetch(`/api/meetings/${mid}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: title,
+          date: document.getElementById('edit-mtg-date')?.value,
+          client: document.getElementById('edit-mtg-client')?.value || '',
+          summary: document.getElementById('edit-mtg-summary')?.value || '',
+          actions: document.getElementById('edit-mtg-actions')?.value || '',
+        })
+      });
+
+      if (!res.ok) throw new Error(`서버 오류 (${res.status})`);
+      this.toast('✅ 회의록이 수정됐어요!', 'success');
+      document.getElementById('app-modal')?.remove();
+      this.loadMeetings();
+    } catch(e) {
+      this.toast('수정 실패: ' + e.message, 'error');
+      if (btn) { btn.textContent = '확인'; btn.disabled = false; }
     }
   },
 
@@ -2694,24 +2799,59 @@ const MemoNest = {
   // ══════════════════════════════════════════════════════════════════════════
   // SCHEDULE
   // ══════════════════════════════════════════════════════════════════════════
+  // ── 카테고리 파스텔 색상 ────────────────────────────────────────────────
+  _catStyle: {
+    '회의':   { bg:'#ede9fe', border:'#c4b5fd', dot:'#7c3aed', tag:'#6d28d9' },
+    '개인':   { bg:'#dcfce7', border:'#86efac', dot:'#16a34a', tag:'#15803d' },
+    '이벤트': { bg:'#fef9c3', border:'#fde047', dot:'#ca8a04', tag:'#a16207' },
+    '약속':   { bg:'#fee2e2', border:'#fca5a5', dot:'#dc2626', tag:'#b91c1c' },
+    '기타':   { bg:'#f1f5f9', border:'#cbd5e1', dot:'#64748b', tag:'#475569' },
+  },
+  _getCatStyle(cat) {
+    return this._catStyle[cat] || this._catStyle['기타'];
+  },
+
+  // ── 일정 뷰 상태 ─────────────────────────────────────────────────────────
+  _schedView: {
+    mode: 'month',       // 'day' | 'week' | 'month'
+    anchor: null,        // 현재 기준 Date (null = today)
+  },
+
   renderSchedule() {
-    const gmtStr = this.getGMTOffsetStr();
-    const tzName = this.getTimezoneName();
+    // GCal 배너 + 2분할 레이아웃
+    const isPC = this.isPC();
     return `
     ${this._renderGCalBanner()}
-    <div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;padding:10px 14px;background:rgba(99,102,241,0.06);border-radius:12px;border:1px solid rgba(99,102,241,0.15)">
-      <span style="font-size:16px">🌐</span>
-      <div>
-        <div style="font-size:13px;font-weight:600;color:var(--primary)">${gmtStr} 기준으로 표시 중</div>
-        <div style="font-size:11px;color:var(--text-muted)">${tzName} · 현재 단말 시간대</div>
+    <div id="schedule-split" style="display:${isPC?'grid':'block'};grid-template-columns:1fr 1fr;gap:16px;min-height:0;${isPC?'':''}">
+      <!-- 왼쪽: 캘린더 -->
+      <div id="cal-pane" style="min-width:0">
+        <div id="cal-container" style="animation:fadeSlide 0.25s ease"></div>
+      </div>
+      <!-- 오른쪽: 리스트 -->
+      <div id="list-pane" style="min-width:0;${isPC?'max-height:calc(100vh - 220px);overflow-y:auto;':''}">
+        <div id="schedule-list"><div class="loading"><div class="spinner"></div></div></div>
       </div>
     </div>
-    <div id="schedule-list"><div class="loading"><div class="spinner"></div></div></div>`;
+    <style>
+      @keyframes fadeSlide {
+        from { opacity:0; transform:translateY(6px); }
+        to   { opacity:1; transform:translateY(0); }
+      }
+      .cal-day-cell { transition: background 0.15s, transform 0.15s; cursor:pointer; }
+      .cal-day-cell:hover { background: rgba(99,102,241,0.08) !important; transform:scale(1.04); }
+      .cal-day-cell.selected { background: var(--primary) !important; color:white !important; border-radius:50%; }
+      .cal-day-cell.today { font-weight:700; }
+      .sch-card-anim { animation: fadeSlide 0.2s ease; }
+    </style>`;
   },
 
   async loadSchedules() {
     const el = document.getElementById('schedule-list');
     if (!el) return;
+
+    // 캘린더 렌더 (데이터 없어도)
+    if (!this._scheduleCache) this._scheduleCache = {};
+
     try {
       const res = await fetch(`/api/schedules?dbId=${this.state.dbIds.schedule}`);
       const data = await res.json();
@@ -2723,120 +2863,385 @@ const MemoNest = {
           <button class="btn btn-secondary" onclick="MemoNest.recoverFromApp()">🔄 DB 복원 시도</button>
         </div>`; return;
       }
-      const results = data.results || [];
-      if (!results.length) { el.innerHTML = '<div class="empty-state"><span class="emoji">📅</span><p>일정이 없어요!<br>+ 버튼으로 추가해보세요</p></div>'; return; }
 
-      // onclick 인라인에 데이터 직접 삽입 시 \n·"·' 등 특수문자로 버튼이 깨지는 문제 방지
-      // → 데이터를 캐시에 저장하고 pageId만 참조
+      const results = data.results || [];
       this._scheduleCache = {};
       results.forEach(s => {
         const props = s.properties;
         this._scheduleCache[s.id] = {
-          title:    props['일정 제목']?.title?.[0]?.text?.content || '제목 없음',
-          datetime: props['날짜/시간']?.date?.start || '',
-          location: props['장소']?.rich_text?.[0]?.text?.content || '',
-          category: props['카테고리']?.select?.name || '',
-          reminder: props['알림']?.select?.name || '',
-          memo:     props['메모']?.rich_text?.[0]?.text?.content || '',
+          title:       props['일정 제목']?.title?.[0]?.text?.content || '제목 없음',
+          datetime:    props['날짜/시간']?.date?.start || '',
+          endDatetime: props['날짜/시간']?.date?.end || '',
+          location:    props['장소']?.rich_text?.[0]?.text?.content || '',
+          category:    props['카테고리']?.select?.name || '',
+          reminder:    props['알림']?.select?.name || '',
+          memo:        props['메모']?.rich_text?.[0]?.text?.content || '',
         };
       });
 
-      el.innerHTML = results.map(s => {
-        const props = s.properties;
-        const { title, datetime: datetimeRaw, location, category, reminder } = this._scheduleCache[s.id];
+      // 캘린더 렌더
+      this._renderCalendar();
 
-        // 로컬 시간으로 포맷
-        let datetimeDisplay = datetimeRaw;
-        let isUpcoming = false;
-        let isPast = false;
-        if (datetimeRaw) {
-          try {
-            const dt = new Date(datetimeRaw);
-            const now = new Date();
-            isUpcoming = dt > now && dt - now < 24 * 60 * 60 * 1000;
-            isPast = dt < now;
-            datetimeDisplay = dt.toLocaleString('ko-KR', {
-              year: 'numeric', month: 'long', day: 'numeric',
-              weekday: 'short', hour: '2-digit', minute: '2-digit',
-              hour12: false
-            });
-          } catch(e) {}
+      // 리스트 렌더
+      this._renderScheduleList();
+
+    } catch (e) {
+      el.innerHTML = '<p style="color:#ef4444;text-align:center;padding:20px">로드 실패: ' + e.message + '</p>';
+    }
+  },
+
+  // ── 캘린더 렌더 ───────────────────────────────────────────────────────────
+  _renderCalendar() {
+    const container = document.getElementById('cal-container');
+    if (!container) return;
+
+    const mode = this._schedView.mode || 'month';
+    const anchor = this._schedView.anchor ? new Date(this._schedView.anchor) : new Date();
+    const today = new Date();
+
+    // 이벤트 날짜 Set (빠른 조회용)
+    const eventDates = new Set();
+    Object.values(this._scheduleCache || {}).forEach(s => {
+      if (s.datetime) eventDates.add(s.datetime.slice(0,10));
+    });
+
+    // 탭 버튼
+    const tabs = ['day','week','month'].map(m => `
+      <button onclick="MemoNest._setCalMode('${m}')"
+        style="padding:5px 14px;border-radius:20px;border:none;cursor:pointer;font-size:12px;font-weight:600;
+               transition:all 0.2s;
+               ${mode===m ? 'background:var(--primary);color:white;box-shadow:0 2px 6px rgba(99,102,241,0.3)' : 'background:#f1f5f9;color:#64748b'}">
+        ${m==='day'?'일':m==='week'?'주':'월'}
+      </button>`).join('');
+
+    let calBody = '';
+    if (mode === 'month') {
+      calBody = this._renderMonthCal(anchor, today, eventDates);
+    } else if (mode === 'week') {
+      calBody = this._renderWeekCal(anchor, today, eventDates);
+    } else {
+      calBody = this._renderDayCal(anchor, today, eventDates);
+    }
+
+    // 헤더 레이블
+    let headerLabel = '';
+    if (mode === 'month') {
+      headerLabel = anchor.toLocaleDateString('ko-KR', {year:'numeric', month:'long'});
+    } else if (mode === 'week') {
+      const weekStart = new Date(anchor);
+      weekStart.setDate(anchor.getDate() - anchor.getDay());
+      const weekEnd = new Date(weekStart); weekEnd.setDate(weekStart.getDate() + 6);
+      headerLabel = `${weekStart.toLocaleDateString('ko-KR',{month:'short',day:'numeric'})} – ${weekEnd.toLocaleDateString('ko-KR',{month:'short',day:'numeric'})}`;
+    } else {
+      headerLabel = anchor.toLocaleDateString('ko-KR', {year:'numeric', month:'long', day:'numeric', weekday:'short'});
+    }
+
+    container.innerHTML = `
+      <div style="background:white;border-radius:14px;border:1px solid #e2e8f0;padding:14px 14px 10px;box-shadow:0 1px 4px rgba(0,0,0,0.05)">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+          <div style="display:flex;gap:6px">${tabs}</div>
+          <div style="display:flex;align-items:center;gap:6px">
+            <button onclick="MemoNest._calNavigate(-1)" style="border:1px solid #e2e8f0;background:white;border-radius:8px;width:28px;height:28px;cursor:pointer;font-size:14px;display:flex;align-items:center;justify-content:center;transition:background 0.15s" onmouseover="this.style.background='#f1f5f9'" onmouseout="this.style.background='white'">‹</button>
+            <span style="font-size:13px;font-weight:700;color:#374151;min-width:80px;text-align:center">${headerLabel}</span>
+            <button onclick="MemoNest._calNavigate(1)"  style="border:1px solid #e2e8f0;background:white;border-radius:8px;width:28px;height:28px;cursor:pointer;font-size:14px;display:flex;align-items:center;justify-content:center;transition:background 0.15s" onmouseover="this.style.background='#f1f5f9'" onmouseout="this.style.background='white'">›</button>
+            <button onclick="MemoNest._calGoToday()" style="border:1px solid #e2e8f0;background:white;border-radius:8px;padding:4px 10px;cursor:pointer;font-size:11px;color:#6366f1;font-weight:600;transition:background 0.15s" onmouseover="this.style.background='#f1f5f9'" onmouseout="this.style.background='white'">오늘</button>
+          </div>
+        </div>
+        ${calBody}
+      </div>`;
+  },
+
+  _renderMonthCal(anchor, today, eventDates) {
+    const year = anchor.getFullYear(), month = anchor.getMonth();
+    const firstDay = new Date(year, month, 1).getDay();
+    const daysInMonth = new Date(year, month+1, 0).getDate();
+    const selectedStr = this._schedView.selectedDate;
+
+    const dayLabels = ['일','월','화','수','목','금','토'].map((d,i) =>
+      `<div style="text-align:center;font-size:11px;font-weight:700;color:${i===0?'#ef4444':i===6?'#6366f1':'#94a3b8'};padding:4px 0">${d}</div>`
+    ).join('');
+
+    let cells = '';
+    // 빈 칸
+    for (let i=0; i<firstDay; i++) cells += '<div></div>';
+    // 날짜 칸
+    for (let d=1; d<=daysInMonth; d++) {
+      const dateStr = `${year}-${String(month+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+      const isToday = today.getFullYear()===year && today.getMonth()===month && today.getDate()===d;
+      const isSelected = selectedStr === dateStr;
+      const hasEvent = eventDates.has(dateStr);
+      const dow = (firstDay + d - 1) % 7;
+      const color = dow===0?'#ef4444':dow===6?'#6366f1':'#374151';
+
+      cells += `
+        <div class="cal-day-cell${isSelected?' selected':''}"
+          onclick="MemoNest._calSelectDate('${dateStr}')"
+          style="text-align:center;padding:5px 2px;border-radius:50%;position:relative;
+                 ${isToday&&!isSelected?'border:2px solid var(--primary)':'border:2px solid transparent'}
+                 ${isSelected?'background:var(--primary);color:white':'color:'+color}">
+          <span style="font-size:13px;${isToday&&!isSelected?'font-weight:700':''}">${d}</span>
+          ${hasEvent ? `<span style="position:absolute;bottom:2px;left:50%;transform:translateX(-50%);width:4px;height:4px;border-radius:50%;background:${isSelected?'white':'var(--primary)'};display:block"></span>` : ''}
+        </div>`;
+    }
+
+    return `<div style="display:grid;grid-template-columns:repeat(7,1fr);gap:2px">${dayLabels}${cells}</div>`;
+  },
+
+  _renderWeekCal(anchor, today, eventDates) {
+    const weekStart = new Date(anchor);
+    weekStart.setDate(anchor.getDate() - anchor.getDay());
+    const selectedStr = this._schedView.selectedDate;
+    const days = [];
+    for (let i=0; i<7; i++) {
+      const d = new Date(weekStart); d.setDate(weekStart.getDate() + i);
+      days.push(d);
+    }
+    const dayLabels = ['일','월','화','수','목','금','토'];
+    const cells = days.map((d, i) => {
+      const dateStr = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+      const isToday = d.toDateString() === today.toDateString();
+      const isSelected = selectedStr === dateStr;
+      const hasEvent = eventDates.has(dateStr);
+      const color = i===0?'#ef4444':i===6?'#6366f1':'#374151';
+      return `
+        <div onclick="MemoNest._calSelectDate('${dateStr}')"
+          style="text-align:center;padding:8px 4px;border-radius:10px;cursor:pointer;transition:all 0.15s;
+                 ${isSelected?'background:var(--primary);color:white':'background:#f8fafc;color:'+color}
+                 ${isToday&&!isSelected?';outline:2px solid var(--primary)':''}
+                 position:relative">
+          <div style="font-size:10px;font-weight:600;margin-bottom:2px">${dayLabels[i]}</div>
+          <div style="font-size:16px;font-weight:700">${d.getDate()}</div>
+          ${hasEvent ? `<span style="position:absolute;bottom:3px;left:50%;transform:translateX(-50%);width:4px;height:4px;border-radius:50%;background:${isSelected?'white':'var(--primary)'};display:block"></span>` : ''}
+        </div>`;
+    }).join('');
+    return `<div style="display:grid;grid-template-columns:repeat(7,1fr);gap:4px">${cells}</div>`;
+  },
+
+  _renderDayCal(anchor, today, eventDates) {
+    // 해당 날짜의 시간대별 일정 표시
+    const dateStr = `${anchor.getFullYear()}-${String(anchor.getMonth()+1).padStart(2,'0')}-${String(anchor.getDate()).padStart(2,'0')}`;
+    const isToday = anchor.toDateString() === today.toDateString();
+    const daySchedules = Object.entries(this._scheduleCache || {}).filter(([,s]) =>
+      s.datetime && s.datetime.startsWith(dateStr)
+    ).sort(([,a],[,b]) => a.datetime.localeCompare(b.datetime));
+
+    return `
+      <div style="text-align:center;padding:6px 0 10px">
+        <div style="font-size:24px;font-weight:800;color:${isToday?'var(--primary)':'#374151'}">${anchor.getDate()}</div>
+        <div style="font-size:11px;color:#9ca3af">${anchor.toLocaleDateString('ko-KR',{weekday:'long'})}</div>
+      </div>
+      <div style="max-height:200px;overflow-y:auto">
+        ${daySchedules.length ? daySchedules.map(([sid,s]) => {
+          const cs = this._getCatStyle(s.category);
+          const timeStr = s.datetime ? new Date(s.datetime).toLocaleTimeString('ko-KR',{hour:'2-digit',minute:'2-digit',hour12:false}) : '';
+          return `<div style="display:flex;gap:8px;padding:6px 8px;margin-bottom:4px;border-radius:8px;background:${cs.bg};border-left:3px solid ${cs.dot};cursor:pointer"
+            onclick="MemoNest.showEditScheduleById('${sid}')">
+            <span style="font-size:11px;color:${cs.tag};font-weight:600;white-space:nowrap">${timeStr}</span>
+            <span style="font-size:12px;font-weight:600;color:#374151;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${s.title}</span>
+          </div>`;
+        }).join('') : '<div style="text-align:center;padding:16px;font-size:12px;color:#9ca3af">일정 없음</div>'}
+      </div>`;
+  },
+
+  _setCalMode(mode) {
+    this._schedView.mode = mode;
+    this._schedView.selectedDate = null;
+    const container = document.getElementById('cal-container');
+    if (container) container.style.animation = 'none';
+    this._renderCalendar();
+    this._renderScheduleList();
+    if (container) { container.style.animation = ''; container.offsetHeight; container.style.animation = 'fadeSlide 0.25s ease'; }
+  },
+
+  _calNavigate(dir) {
+    const mode = this._schedView.mode;
+    const anchor = this._schedView.anchor ? new Date(this._schedView.anchor) : new Date();
+    if (mode === 'month') anchor.setMonth(anchor.getMonth() + dir);
+    else if (mode === 'week') anchor.setDate(anchor.getDate() + dir * 7);
+    else anchor.setDate(anchor.getDate() + dir);
+    this._schedView.anchor = anchor.toISOString();
+    this._schedView.selectedDate = null;
+    this._animateCalendar(() => { this._renderCalendar(); this._renderScheduleList(); });
+  },
+
+  _calGoToday() {
+    this._schedView.anchor = new Date().toISOString();
+    this._schedView.selectedDate = new Date().toISOString().slice(0,10);
+    this._animateCalendar(() => { this._renderCalendar(); this._renderScheduleList(); });
+  },
+
+  _calSelectDate(dateStr) {
+    this._schedView.selectedDate = dateStr;
+    this._schedView.anchor = new Date(dateStr + 'T12:00:00').toISOString();
+    this._renderCalendar();
+    this._renderScheduleList();
+  },
+
+  _animateCalendar(fn) {
+    const container = document.getElementById('cal-container');
+    if (!container) { fn(); return; }
+    container.style.opacity = '0';
+    container.style.transform = 'translateY(8px)';
+    setTimeout(() => {
+      fn();
+      container.style.transition = 'opacity 0.22s ease, transform 0.22s ease';
+      container.style.opacity = '1';
+      container.style.transform = 'translateY(0)';
+      setTimeout(() => { container.style.transition = ''; }, 250);
+    }, 80);
+  },
+
+  // ── 일정 리스트 렌더 (오른쪽 패널) ───────────────────────────────────────
+  _renderScheduleList() {
+    const el = document.getElementById('schedule-list');
+    if (!el) return;
+
+    const mode = this._schedView.mode;
+    const anchor = this._schedView.anchor ? new Date(this._schedView.anchor) : new Date();
+    const selectedDate = this._schedView.selectedDate;
+
+    const allItems = Object.entries(this._scheduleCache || {});
+
+    // 필터 함수
+    let filtered = [];
+    let rangeLabel = '';
+    if (mode === 'day' || selectedDate) {
+      const dateStr = selectedDate || anchor.toISOString().slice(0,10);
+      filtered = allItems.filter(([,s]) => s.datetime && s.datetime.startsWith(dateStr));
+      rangeLabel = new Date(dateStr + 'T12:00:00').toLocaleDateString('ko-KR', {month:'long',day:'numeric',weekday:'short'});
+    } else if (mode === 'week') {
+      const ws = new Date(anchor); ws.setDate(anchor.getDate() - anchor.getDay());
+      const we = new Date(ws); we.setDate(ws.getDate() + 7);
+      filtered = allItems.filter(([,s]) => {
+        if (!s.datetime) return false;
+        const d = new Date(s.datetime); return d >= ws && d < we;
+      });
+      rangeLabel = `${ws.toLocaleDateString('ko-KR',{month:'short',day:'numeric'})} ~ ${we.toLocaleDateString('ko-KR',{month:'short',day:'numeric'})} 주간`;
+    } else {
+      // month — 해당 월 전체
+      const year = anchor.getFullYear(), month = anchor.getMonth();
+      filtered = allItems.filter(([,s]) => {
+        if (!s.datetime) return false;
+        const d = new Date(s.datetime);
+        return d.getFullYear()===year && d.getMonth()===month;
+      });
+      rangeLabel = anchor.toLocaleDateString('ko-KR',{year:'numeric',month:'long'});
+    }
+
+    // 날짜순 정렬
+    filtered.sort(([,a],[,b]) => (a.datetime||'').localeCompare(b.datetime||''));
+
+    if (!filtered.length) {
+      el.innerHTML = `
+        <div style="text-align:center;padding:30px 16px;color:#94a3b8">
+          <div style="font-size:28px;margin-bottom:8px">📭</div>
+          <div style="font-size:13px">${rangeLabel}의 일정 없음</div>
+          <button class="btn btn-primary" onclick="MemoNest.showAddSchedule()" style="margin-top:12px;padding:8px 20px;font-size:13px">
+            <i class="fas fa-plus"></i> 일정 추가
+          </button>
+        </div>`;
+      return;
+    }
+
+    const now = new Date();
+    el.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <div style="font-size:12px;font-weight:700;color:#64748b">${rangeLabel} · ${filtered.length}건</div>
+      </div>
+      ${filtered.map(([sid, s]) => {
+        const cs = this._getCatStyle(s.category);
+        const dt = s.datetime ? new Date(s.datetime) : null;
+        const dtEnd = s.endDatetime ? new Date(s.endDatetime) : null;
+        const isUpcoming = dt && dt > now && dt - now < 24*60*60*1000;
+        const isPast = dt && dt < now;
+
+        let timeStr = '';
+        if (dt) {
+          timeStr = dt.toLocaleString('ko-KR', {
+            month:'short', day:'numeric', weekday:'short',
+            hour:'2-digit', minute:'2-digit', hour12:false
+          });
+          if (dtEnd) {
+            timeStr += ' ~ ' + dtEnd.toLocaleTimeString('ko-KR', { hour:'2-digit', minute:'2-digit', hour12:false });
+          }
         }
 
-        const borderColor = isUpcoming ? '#f59e0b' : isPast ? '#e2e8f0' : '#e2e8f0';
-        const badge = isUpcoming ? `<span style="background:#fef3c7;color:#d97706;font-size:11px;padding:2px 8px;border-radius:20px;font-weight:600">⏰ 오늘 예정</span>`
-          : isPast ? `<span style="background:#f1f5f9;color:#94a3b8;font-size:11px;padding:2px 8px;border-radius:20px">지난 일정</span>` : '';
-
         const gcalBtn = this.state.googleCalTokens
-          ? `<button data-sid="${s.id}" onclick="MemoNest.addToGoogleCalendar(this.dataset.sid)" style="background:none;border:1px solid #bfdbfe;border-radius:6px;padding:3px 7px;cursor:pointer;font-size:11px;color:#3b82f6" title="Google Calendar에 추가"><i class="fas fa-calendar-plus"></i></button>`
+          ? `<button data-sid="${sid}" onclick="MemoNest.addToGoogleCalendar(this.dataset.sid)" style="background:none;border:1px solid ${cs.border};border-radius:6px;padding:3px 7px;cursor:pointer;font-size:11px;color:${cs.tag}" title="Google Calendar에 추가"><i class="fas fa-calendar-plus"></i></button>`
           : '';
-
-        // 회의 카테고리인 경우 회의록 작성 버튼 표시
-        const isMeeting = category === '회의';
+        const isMeeting = s.category === '회의';
         const meetingNoteBtn = isMeeting
-          ? `<button data-sid="${s.id}" data-stitle="${title.replace(/"/g,'&quot;')}"
+          ? `<button data-sid="${sid}" data-stitle="${s.title.replace(/"/g,'&quot;')}"
               onclick="MemoNest.showAddMeetingModal(this.dataset.sid, this.dataset.stitle)"
-              style="background:none;border:1px solid #c7d2fe;border-radius:6px;padding:3px 7px;cursor:pointer;font-size:11px;color:#6366f1"
-              title="회의록 작성"><i class="fas fa-file-alt"></i></button>`
-          : '';
+              style="background:none;border:1px solid ${cs.border};border-radius:6px;padding:3px 7px;cursor:pointer;font-size:11px;color:${cs.tag}"
+              title="회의록 작성"><i class="fas fa-file-alt"></i></button>` : '';
 
         return `
-        <div class="card" style="border-color:${borderColor}">
-          <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px">
-            <div style="font-size:15px;font-weight:600;flex:1;min-width:0">📅 ${title}</div>
-            <div style="display:flex;align-items:center;gap:4px;flex-shrink:0">
-              ${badge}
-              ${gcalBtn}
-              ${meetingNoteBtn}
-              <button data-sid="${s.id}" onclick="MemoNest.showEditScheduleById(this.dataset.sid)"
-                style="background:none;border:1px solid #e2e8f0;border-radius:6px;padding:3px 7px;cursor:pointer;font-size:11px;color:#64748b" title="수정">
-                <i class="fas fa-pen"></i>
-              </button>
-              <button data-sid="${s.id}" onclick="MemoNest.deleteSchedule(this.dataset.sid)"
-                style="background:none;border:1px solid #fee2e2;border-radius:6px;padding:3px 7px;cursor:pointer;font-size:11px;color:#ef4444" title="삭제">
-                <i class="fas fa-trash"></i>
-              </button>
+        <div class="sch-card-anim" style="margin-bottom:8px;padding:10px 12px;border-radius:12px;
+          background:${cs.bg};border:1px solid ${cs.border};
+          opacity:${isPast?'0.6':'1'};transition:opacity 0.2s,transform 0.2s;cursor:default">
+          <div style="display:flex;justify-content:space-between;align-items:flex-start">
+            <div style="flex:1;min-width:0">
+              <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
+                <span style="width:8px;height:8px;border-radius:50%;background:${cs.dot};flex-shrink:0;display:inline-block"></span>
+                <span style="font-size:14px;font-weight:700;color:#1e293b;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${s.title}</span>
+                ${isUpcoming ? '<span style="background:#fef3c7;color:#d97706;font-size:10px;padding:1px 6px;border-radius:10px;font-weight:700;flex-shrink:0">⏰D-day</span>' : ''}
+              </div>
+              ${timeStr ? `<div style="font-size:11px;color:#64748b;margin-bottom:4px"><i class="fas fa-clock" style="margin-right:3px"></i>${timeStr}</div>` : ''}
+              <div style="display:flex;gap:4px;flex-wrap:wrap;align-items:center">
+                ${s.category ? `<span style="font-size:10px;font-weight:700;color:${cs.tag};background:white;border:1px solid ${cs.border};padding:1px 8px;border-radius:10px">${s.category}</span>` : ''}
+                ${s.location ? this._renderLocationBadge(s.location) : ''}
+                ${s.reminder && s.reminder!=='없음' ? `<span style="font-size:10px;color:#d97706;background:#fef3c7;border-radius:10px;padding:1px 7px">🔔${s.reminder}</span>` : ''}
+              </div>
+            </div>
+            <div style="display:flex;gap:3px;flex-shrink:0;margin-left:6px">
+              ${gcalBtn}${meetingNoteBtn}
+              <button data-sid="${sid}" onclick="MemoNest.showEditScheduleById(this.dataset.sid)"
+                style="background:none;border:1px solid ${cs.border};border-radius:6px;padding:3px 7px;cursor:pointer;font-size:11px;color:${cs.tag}" title="수정">
+                <i class="fas fa-pen"></i></button>
+              <button data-sid="${sid}" onclick="MemoNest.deleteSchedule(this.dataset.sid)"
+                style="background:none;border:1px solid #fecaca;border-radius:6px;padding:3px 7px;cursor:pointer;font-size:11px;color:#ef4444" title="삭제">
+                <i class="fas fa-trash"></i></button>
             </div>
           </div>
-          <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
-            ${datetimeRaw ? `<span style="font-size:12px;color:#475569;display:flex;align-items:center;gap:4px"><i class="fas fa-clock" style="color:var(--primary)"></i> ${datetimeDisplay}</span>` : ''}
-            ${location ? this._renderLocationBadge(location) : ''}
-          </div>
-          <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">
-            ${category ? `<span class="tag">${category}</span>` : ''}
-            ${reminder && reminder !== '없음' ? `<span class="tag" style="background:rgba(245,158,11,0.1);color:#d97706">🔔 ${reminder}</span>` : ''}
-          </div>
         </div>`;
-      }).join('');
-    } catch (e) { el.innerHTML = '<p style="color:#ef4444;text-align:center;padding:20px">로드 실패</p>'; }
+      }).join('')}`;
   },
 
   // 캐시에서 꺼내서 수정 모달 열기 (특수문자 안전)
   showEditScheduleById(pageId) {
     const d = this._scheduleCache?.[pageId];
     if (!d) { this.toast('일정 데이터를 찾을 수 없어요. 새로고침 후 다시 시도해주세요.', 'error'); return; }
-    this.showEditSchedule(pageId, d.title, d.datetime, d.location, d.category, d.reminder, d.memo);
+    this.showEditSchedule(pageId, d.title, d.datetime, d.location, d.category, d.reminder, d.memo, d.endDatetime);
   },
 
-  showEditSchedule(pageId, title, datetimeRaw, location, category, reminder, memo) {
-    // datetimeRaw → datetime-local 형식으로 변환
-    let localVal = '';
-    if (datetimeRaw) {
+  showEditSchedule(pageId, title, datetimeRaw, location, category, reminder, memo, endDatetimeRaw) {
+    // raw → datetime-local 형식 변환 공통 헬퍼
+    const _toLocalVal = raw => {
+      if (!raw) return '';
       try {
-        const dt = new Date(datetimeRaw);
+        const dt = new Date(raw);
         const pad = n => String(n).padStart(2,'0');
-        localVal = `${dt.getFullYear()}-${pad(dt.getMonth()+1)}-${pad(dt.getDate())}T${pad(dt.getHours())}:${pad(dt.getMinutes())}`;
-      } catch(e) { localVal = datetimeRaw.slice(0,16); }
-    }
+        return `${dt.getFullYear()}-${pad(dt.getMonth()+1)}-${pad(dt.getDate())}T${pad(dt.getHours())}:${pad(dt.getMinutes())}`;
+      } catch(e) { return raw.slice(0,16); }
+    };
+    const localVal    = _toLocalVal(datetimeRaw);
+    const endLocalVal = _toLocalVal(endDatetimeRaw);
     const gmtStr = this.getGMTOffsetStr();
     this.showModal('✏️ 일정 수정', `
       <div class="form-group">
         <label class="form-label">일정 제목 *</label>
         <input class="form-input" id="edit-sch-title" value="${title}">
       </div>
-      <div class="form-group">
-        <label class="form-label">날짜/시간 <span style="font-size:11px;color:var(--primary);margin-left:4px">${gmtStr}</span></label>
-        <input class="form-input" type="datetime-local" id="edit-sch-datetime" value="${localVal}">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        <div class="form-group">
+          <label class="form-label">시작 시간 <span style="font-size:11px;color:var(--primary)">${gmtStr}</span></label>
+          <input class="form-input" type="datetime-local" id="edit-sch-datetime" value="${localVal}">
+        </div>
+        <div class="form-group">
+          <label class="form-label">종료 시간 <span style="font-size:11px;color:var(--text-muted)">선택</span></label>
+          <input class="form-input" type="datetime-local" id="edit-sch-end-datetime" value="${endLocalVal}">
+        </div>
       </div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
         <div class="form-group">
@@ -2891,20 +3296,22 @@ const MemoNest = {
   async saveEditSchedule(pageId) {
     const btn = document.querySelector('#app-modal .btn-primary');
     if (btn) { btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 저장 중...'; btn.disabled = true; }
-    const datetimeVal = document.getElementById('edit-sch-datetime')?.value;
-    let datetimeISO = datetimeVal;
-    if (datetimeVal) {
+    const _toISO = val => {
+      if (!val) return null;
       const offset = -new Date().getTimezoneOffset();
       const sign = offset >= 0 ? '+' : '-';
       const h = Math.floor(Math.abs(offset)/60), m = Math.abs(offset)%60;
-      datetimeISO = `${datetimeVal}:00${sign}${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`;
-    }
+      return `${val}:00${sign}${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`;
+    };
+    const datetimeISO    = _toISO(document.getElementById('edit-sch-datetime')?.value);
+    const endDatetimeISO = _toISO(document.getElementById('edit-sch-end-datetime')?.value || '');
     try {
       await fetch(`/api/schedules/${pageId}`, {
         method: 'PATCH', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           title: document.getElementById('edit-sch-title')?.value,
           datetime: datetimeISO,
+          endDatetime: endDatetimeISO || null,
           location: this._serializeLocation(
             document.getElementById('edit-sch-location')?.value || '',
             document.getElementById('edit-sch-online-link')?.value || ''
@@ -2966,17 +3373,26 @@ const MemoNest = {
         <label class="form-label">일정 제목 *</label>
         <input class="form-input" id="sch-title" placeholder="일정 제목">
       </div>
-      <div class="form-group">
-        <label class="form-label">
-          날짜/시간
-          <span style="font-size:11px;font-weight:400;color:var(--primary);margin-left:6px;background:rgba(99,102,241,0.1);padding:2px 8px;border-radius:20px">
-            🌐 ${gmtStr} · ${tzName}
-          </span>
-        </label>
-        <input class="form-input" type="datetime-local" id="sch-datetime" value="${localStr}">
-        <div style="font-size:11px;color:var(--text-muted);margin-top:4px">
-          ⏰ 현재 단말 로컬 시간 기준으로 저장됩니다
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        <div class="form-group">
+          <label class="form-label">
+            시작 시간
+            <span style="font-size:10px;font-weight:400;color:var(--primary);margin-left:4px;background:rgba(99,102,241,0.1);padding:1px 6px;border-radius:20px">
+              🌐 ${gmtStr}
+            </span>
+          </label>
+          <input class="form-input" type="datetime-local" id="sch-datetime" value="${localStr}">
         </div>
+        <div class="form-group">
+          <label class="form-label">
+            종료 시간
+            <span style="font-size:10px;font-weight:400;color:var(--text-muted);margin-left:4px">선택</span>
+          </label>
+          <input class="form-input" type="datetime-local" id="sch-end-datetime">
+        </div>
+      </div>
+      <div style="font-size:11px;color:var(--text-muted);margin-top:-8px;margin-bottom:10px">
+        ⏰ 단말 로컬 시간(${tzName}) 기준 저장
       </div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
         <div class="form-group">
@@ -3021,17 +3437,17 @@ const MemoNest = {
     const btn = document.querySelector('#app-modal .btn-primary');
     if (btn) { btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 저장 중...'; btn.disabled = true; }
 
-    // 로컬 시간 → ISO 8601 (타임존 오프셋 포함)
-    const datetimeVal = document.getElementById('sch-datetime')?.value; // YYYY-MM-DDTHH:MM
-    let datetimeISO = datetimeVal;
-    if (datetimeVal) {
+    // 로컬 시간 → ISO 8601 (타임존 오프셋 포함) 공통 헬퍼
+    const _toISO = val => {
+      if (!val) return null;
       const offset = -new Date().getTimezoneOffset();
       const sign = offset >= 0 ? '+' : '-';
       const h = Math.floor(Math.abs(offset) / 60);
       const m = Math.abs(offset) % 60;
-      const tzStr = `${sign}${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`;
-      datetimeISO = `${datetimeVal}:00${tzStr}`; // 노션 API는 오프셋 포함 ISO 지원
-    }
+      return `${val}:00${sign}${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`;
+    };
+    const datetimeISO    = _toISO(document.getElementById('sch-datetime')?.value);
+    const endDatetimeISO = _toISO(document.getElementById('sch-end-datetime')?.value || '');
 
     try {
       await fetch('/api/schedules', {
@@ -3039,6 +3455,7 @@ const MemoNest = {
         body: JSON.stringify({
           dbId: this.state.dbIds.schedule, title,
           datetime: datetimeISO,
+          endDatetime: endDatetimeISO || null,
           location: this._serializeLocation(
             document.getElementById('sch-location')?.value || '',
             document.getElementById('sch-online-link')?.value || ''
