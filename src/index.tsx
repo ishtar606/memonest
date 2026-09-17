@@ -89,20 +89,46 @@ async function notionRequest(apiKey: string, endpoint: string, method = 'GET', b
 }
 
 // ─── Gemini API Helper ────────────────────────────────────────────────────────
-async function geminiRequest(apiKey: string, prompt: string) {
-  const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: { temperature: 0.7, maxOutputTokens: 2048 }
-      })
+async function geminiRequest(apiKey: string, prompt: string): Promise<string> {
+  if (!apiKey) {
+    console.error('[Gemini] API Key is missing')
+    return ''
+  }
+  try {
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), 25000) // 25초 타임아웃
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: { temperature: 0.7, maxOutputTokens: 2048 }
+        }),
+        signal: controller.signal,
+      }
+    )
+    clearTimeout(timeoutId)
+    if (!res.ok) {
+      const errText = await res.text()
+      console.error(`[Gemini] HTTP ${res.status}: ${errText}`)
+      return ''
     }
-  )
-  const data: any = await res.json()
-  return data.candidates?.[0]?.content?.parts?.[0]?.text || ''
+    const data: any = await res.json()
+    if (data.error) {
+      console.error('[Gemini] API error:', JSON.stringify(data.error))
+      return ''
+    }
+    return data.candidates?.[0]?.content?.parts?.[0]?.text || ''
+  } catch (e: any) {
+    if (e?.name === 'AbortError') {
+      console.error('[Gemini] Request timed out after 25s')
+    } else {
+      console.error('[Gemini] Fetch error:', e?.message)
+    }
+    return ''
+  }
 }
 
 // ─── Groq STT Helper ─────────────────────────────────────────────────────────
@@ -257,6 +283,7 @@ app.post('/api/notion/init', async (c) => {
         '태그': { multi_select: { options: [] } },
         '요약': { rich_text: {} },
         '액션 아이템': { rich_text: {} },
+        '일정 ID': { rich_text: {} },   // 연동된 일정 페이지 ID
         '생성일': { created_time: {} },
       }
     })
@@ -654,13 +681,18 @@ app.get('/api/ideas', async (c) => {
 app.post('/api/meetings', async (c) => {
   const apiKey = c.env.NOTION_API_KEY
   const geminiKey = c.env.GEMINI_API_KEY
-  const { dbId, transcript, manualNotes, date, client } = await c.req.json()
+  const { dbId, transcript, manualNotes, date, client, scheduleId } = await c.req.json()
+
+  if (!dbId) return c.json({ error: 'dbId required' }, 400)
+  if (!transcript && !manualNotes) return c.json({ error: '내용을 입력해주세요' }, 400)
 
   const combined = `음성 녹취:\n${transcript || ''}\n\n수기 메모:\n${manualNotes || ''}`
 
-  // AI 회의록 구조화
-  const structured = await geminiRequest(geminiKey,
-    `다음 회의 내용을 전문적인 회의록으로 구조화해줘.
+  // AI 회의록 구조화 (실패해도 진행)
+  let parsed: any = {}
+  try {
+    const structured = await geminiRequest(geminiKey,
+      `다음 회의 내용을 전문적인 회의록으로 구조화해줘.
 날짜: ${date}
 고객사/프로젝트: ${client || '미지정'}
 
@@ -676,24 +708,33 @@ ${combined}
   "action_items": ["액션아이템1", "액션아이템2"],
   "tags": ["태그1", "태그2"]
 }`
-  )
-
-  let parsed: any = {}
-  try {
+    )
     const jsonMatch = structured.match(/\{[\s\S]*\}/)
     if (jsonMatch) parsed = JSON.parse(jsonMatch[0])
   } catch (e) {
-    parsed = { title: `${client} 회의 ${date}`, summary: combined.slice(0, 200), agenda: [], discussion: combined, action_items: [], tags: [] }
+    // AI 실패해도 기본값으로 진행
+  }
+  // AI 결과가 없으면 기본값
+  if (!parsed.title) {
+    parsed = {
+      title: client ? `${client} 회의 ${date || ''}`.trim() : `회의록 ${date || new Date().toISOString().split('T')[0]}`,
+      summary: combined.slice(0, 200),
+      agenda: [],
+      discussion: combined,
+      action_items: [],
+      tags: []
+    }
   }
 
   const properties: any = {
     '회의 제목': { title: [{ text: { content: parsed.title || `${client} 회의` } }] },
-    '날짜': { date: { start: date } },
+    '날짜': { date: { start: date || new Date().toISOString().split('T')[0] } },
     '고객사/프로젝트': { rich_text: [{ text: { content: client || '' } }] },
-    '요약': { rich_text: [{ text: { content: parsed.summary || '' } }] },
-    '액션 아이템': { rich_text: [{ text: { content: (parsed.action_items || []).join('\n') } }] },
+    '요약': { rich_text: [{ text: { content: (parsed.summary || '').slice(0, 2000) } }] },
+    '액션 아이템': { rich_text: [{ text: { content: (parsed.action_items || []).join('\n').slice(0, 2000) } }] },
   }
-  if (parsed.tags?.length) properties['태그'] = { multi_select: parsed.tags.map((t: string) => ({ name: t })) }
+  if (parsed.tags?.length) properties['태그'] = { multi_select: parsed.tags.slice(0, 5).map((t: string) => ({ name: t.slice(0, 100) })) }
+  if (scheduleId) properties['일정 ID'] = { rich_text: [{ text: { content: scheduleId } }] }
 
   const children: any[] = [
     { object: 'block', type: 'heading_2', heading_2: { rich_text: [{ text: { content: '📝 회의 요약' } }] } },

@@ -4,8 +4,14 @@
 const MemoNest = {
   // ── State ──────────────────────────────────────────────────────────────────
   // ── 앱 버전/개발 로그 ─────────────────────────────────────────────────────
-  VERSION: '2.2.0',
+  VERSION: '2.3.0',
   CHANGELOG: [
+    { ver: '2.3.0', date: '2026-09-17', changes: [
+      '회의록 완전 개편: 리스트뷰 메인 + 팝업 작성 UI',
+      '일정-회의록 연동: 회의 카테고리 일정 → 회의록 등록가능/완료 구분 표시',
+      'AI 처리 버튼 수정: 25초 타임아웃 + 에러 복원, 실패해도 기본값으로 노션 저장',
+      '회의록 작성 시 scheduleId 전달 → 노션 일정 ID 필드 저장',
+    ] },
     { ver: '2.2.0', date: '2026-09-16', changes: [
       'Google Calendar 연동: OAuth 2.0 인증 + 일정 자동 동기화',
       '일정 탭: 구글캘린더 연동 버튼 + 개별/전체 내보내기',
@@ -297,7 +303,7 @@ const MemoNest = {
     const actions = {
       todo: () => this.showAddTodo(),
       schedule: () => this.showAddSchedule(),
-      meeting: () => {},
+      meeting: () => this.showAddMeetingModal(),
       shopping: () => this.showAddShopping(),
       idea: () => this.showAddIdea(),
       novel: () => this.showAddNovel(),
@@ -760,7 +766,7 @@ const MemoNest = {
     const fabConfigs = {
       todo: { icon: 'fa-plus', action: () => this.showAddTodo() },
       schedule: { icon: 'fa-plus', action: () => this.showAddSchedule() },
-      meeting: { icon: 'fa-microphone', action: () => this.navigate('meeting') },
+      meeting: { icon: 'fa-plus', action: () => this.showAddMeetingModal() },
       shopping: { icon: 'fa-plus', action: () => this.showAddShopping() },
       idea: { icon: 'fa-lightbulb', action: () => this.showAddIdea() },
       novel: { icon: 'fa-pen', action: () => this.showAddNovel() },
@@ -1513,14 +1519,44 @@ const MemoNest = {
   // ══════════════════════════════════════════════════════════════════════════
   // MEETING NOTES
   // ══════════════════════════════════════════════════════════════════════════
+  // ══════════════════════════════════════════════════════════════════════════
+  // MEETING — 리스트뷰 메인 + 팝업 작성
+  // ══════════════════════════════════════════════════════════════════════════
+
+  // 회의록과 연동된 일정 ID 캐시 (loadMeetings 시 채움)
+  _meetingScheduleIds: new Set(),
+
   renderMeeting() {
     return `
-    <div class="card" style="margin-bottom:12px">
-      <div class="card-title" style="margin-bottom:16px">🎙️ 새 회의록 작성</div>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+      <div style="font-size:15px;font-weight:700;color:var(--text)">🎙️ 회의록</div>
+      <button class="btn btn-primary" onclick="MemoNest.showAddMeetingModal()" style="padding:8px 16px;font-size:13px">
+        <i class="fas fa-plus"></i> 새 회의록
+      </button>
+    </div>
 
+    <!-- 일정에서 연동 가능한 회의 섹션 -->
+    <div id="meeting-schedule-link-section"></div>
+
+    <!-- 회의록 리스트 -->
+    <div id="meeting-list"><div class="loading"><div class="spinner"></div></div></div>`;
+  },
+
+  // ── 회의록 추가 팝업 ────────────────────────────────────────────────────
+  showAddMeetingModal(scheduleId = null, scheduleTitle = '') {
+    const linkedLabel = scheduleId
+      ? `<div style="padding:8px 12px;background:rgba(99,102,241,0.08);border-radius:8px;font-size:12px;color:#6366f1;margin-bottom:14px">
+           <i class="fas fa-link"></i> 일정 연동: <strong>${scheduleTitle}</strong>
+           <input type="hidden" id="meeting-linked-sid" value="${scheduleId}">
+         </div>`
+      : '<input type="hidden" id="meeting-linked-sid" value="">';
+
+    this.showModal('🎙️ 새 회의록 작성', `
+      ${linkedLabel}
       <div class="form-group">
         <label class="form-label">고객사 / 프로젝트명</label>
-        <input class="form-input" id="meeting-client" placeholder="예: 삼성전자, Project Alpha">
+        <input class="form-input" id="meeting-client" placeholder="예: 삼성전자, Project Alpha"
+          value="${scheduleTitle ? scheduleTitle : ''}">
       </div>
       <div class="form-group">
         <label class="form-label">날짜</label>
@@ -1529,15 +1565,15 @@ const MemoNest = {
 
       <div class="form-group">
         <label class="form-label">🎙️ 음성 녹음</label>
-        <div style="text-align:center;padding:20px;background:#f8fafc;border-radius:14px;border:1.5px dashed #e2e8f0">
-          <div class="waveform" id="waveform" style="display:none;justify-content:center;margin-bottom:12px">
+        <div style="text-align:center;padding:16px;background:#f8fafc;border-radius:12px;border:1.5px dashed #e2e8f0">
+          <div class="waveform" id="waveform" style="display:none;justify-content:center;margin-bottom:10px">
             ${Array(7).fill('<div class="wave-bar"></div>').join('')}
           </div>
           <div class="record-timer" id="record-timer" style="display:none">0:00</div>
-          <button class="record-btn" id="record-btn" onclick="MemoNest.toggleRecording('meeting')">
+          <button class="record-btn" id="record-btn" onclick="MemoNest.toggleRecording('meeting')" style="margin:0 auto">
             <i class="fas fa-microphone" id="record-icon"></i>
           </button>
-          <p style="font-size:12px;color:#94a3b8;margin-top:10px" id="record-hint">버튼을 눌러 녹음 시작</p>
+          <p style="font-size:12px;color:#94a3b8;margin-top:8px" id="record-hint">버튼을 눌러 녹음 시작</p>
         </div>
         <div id="stt-result" style="display:none;margin-top:10px">
           <div class="ai-card">
@@ -1549,16 +1585,262 @@ const MemoNest = {
 
       <div class="form-group">
         <label class="form-label">✍️ 수기 메모 (선택)</label>
-        <textarea class="form-textarea" id="meeting-notes" placeholder="회의 중 메모한 내용을 입력하세요&#10;음성 녹취와 합쳐서 AI가 회의록을 정리합니다"></textarea>
+        <textarea class="form-textarea" id="meeting-notes" rows="4"
+          placeholder="회의 중 메모한 내용을 입력하세요&#10;음성 녹취와 합쳐서 AI가 회의록을 정리합니다"></textarea>
       </div>
 
-      <button class="btn btn-primary btn-block" onclick="MemoNest.saveMeeting()">
-        <i class="fas fa-magic"></i> AI 회의록 생성 & 노션 저장
-      </button>
-    </div>
+      <div id="meeting-save-result" style="display:none"></div>
 
-    <div class="section-title">최근 회의록</div>
-    <div id="meeting-list"><div class="loading"><div class="spinner"></div></div></div>`;
+      <div style="display:flex;gap:8px;margin-top:4px">
+        <button class="btn btn-secondary" style="flex:1" onclick="document.getElementById('app-modal').remove()">취소</button>
+        <button class="btn btn-primary" style="flex:1" id="meeting-save-btn" onclick="MemoNest.saveMeeting()">
+          <i class="fas fa-magic"></i> AI 회의록 생성 & 저장
+        </button>
+      </div>
+    `);
+
+    // 모달의 기본 confirm 버튼 제거 (직접 버튼 삽입했으므로)
+    const defaultBtns = document.querySelector('#app-modal .modal-body + div');
+    if (defaultBtns) defaultBtns.remove();
+  },
+
+  async saveMeeting() {
+    const client = document.getElementById('meeting-client')?.value?.trim();
+    const date = document.getElementById('meeting-date')?.value;
+    const transcript = document.getElementById('stt-text')?.textContent || '';
+    const manualNotes = document.getElementById('meeting-notes')?.value || '';
+    const scheduleId = document.getElementById('meeting-linked-sid')?.value || '';
+
+    if (!transcript && !manualNotes) {
+      this.toast('녹음하거나 메모를 입력해주세요', 'error'); return;
+    }
+
+    const btn = document.getElementById('meeting-save-btn');
+    const resultEl = document.getElementById('meeting-save-result');
+    if (btn) { btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> AI 처리 중...'; btn.disabled = true; }
+    if (resultEl) { resultEl.style.display = 'none'; }
+
+    try {
+      const res = await fetch('/api/meetings', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ dbId: this.state.dbIds.meeting, transcript, manualNotes, date, client, scheduleId })
+      });
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || `서버 오류 (${res.status})`);
+      }
+
+      const data = await res.json();
+      this.toast('🎉 회의록이 노션에 저장됐어요!', 'success');
+
+      // 저장 완료 결과 표시
+      if (resultEl && data.structured) {
+        resultEl.style.display = 'block';
+        resultEl.innerHTML = `
+          <div style="padding:12px;background:#f0fdf4;border-radius:10px;border:1px solid #bbf7d0;margin-bottom:8px">
+            <div style="font-size:12px;font-weight:700;color:#16a34a;margin-bottom:6px">✅ 저장 완료!</div>
+            ${data.structured.summary ? `<div style="font-size:12px;color:#374151">${data.structured.summary}</div>` : ''}
+          </div>`;
+      }
+
+      if (btn) {
+        btn.innerHTML = '<i class="fas fa-check"></i> 저장 완료';
+        btn.style.background = '#16a34a';
+      }
+
+      // 2초 후 모달 닫기 & 리스트 새로고침
+      setTimeout(() => {
+        document.getElementById('app-modal')?.remove();
+        this.loadMeetings();
+      }, 1800);
+
+    } catch (e) {
+      this.toast('저장 실패: ' + e.message, 'error');
+      if (btn) { btn.innerHTML = '<i class="fas fa-magic"></i> AI 회의록 생성 & 저장'; btn.disabled = false; }
+      if (resultEl) {
+        resultEl.style.display = 'block';
+        resultEl.innerHTML = `<div style="padding:10px;background:#fef2f2;border-radius:8px;font-size:12px;color:#dc2626">
+          ❌ 오류: ${e.message}</div>`;
+      }
+    }
+  },
+
+  async loadMeetings() {
+    const el = document.getElementById('meeting-list');
+    if (!el) return;
+    el.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
+
+    // 일정에서 회의 카테고리 일정 목록 로드 (연동 섹션)
+    await this._loadMeetingScheduleLinks();
+
+    try {
+      const res = await fetch(`/api/meetings?dbId=${this.state.dbIds.meeting}`);
+      const data = await res.json();
+      if (data.object === 'error') {
+        el.innerHTML = `<div style="text-align:center;padding:30px;color:#6b7280">
+          <p style="font-size:32px">🔗</p>
+          <p style="font-weight:600;margin-bottom:8px">노션 DB를 찾을 수 없어요</p>
+          <p style="font-size:12px;color:#9ca3af;margin-bottom:16px">${data.message || 'DB ID가 유효하지 않습니다'}</p>
+          <button class="btn btn-secondary" onclick="MemoNest.recoverFromApp()">🔄 DB 복원 시도</button>
+        </div>`; return;
+      }
+
+      const results = data.results || [];
+
+      // 회의록에 연동된 scheduleId 목록 추출 → _meetingScheduleIds 업데이트
+      this._meetingScheduleIds = new Set(
+        results.map(m => m.properties?.['일정 ID']?.rich_text?.[0]?.text?.content || '').filter(Boolean)
+      );
+      // 연동 섹션 다시 렌더 (연동 완료 상태 반영)
+      await this._renderMeetingScheduleLinks();
+
+      if (!results.length) {
+        el.innerHTML = '<div class="empty-state"><span class="emoji">🎙️</span><p>아직 회의록이 없어요<br>위 버튼으로 작성해보세요</p></div>';
+        return;
+      }
+
+      el.innerHTML = `
+        <div class="section-title" style="margin-bottom:10px">📋 저장된 회의록 (${results.length}건)</div>
+        ${results.map(m => {
+          const props = m.properties;
+          const title = props['회의 제목']?.title?.[0]?.text?.content || '제목 없음';
+          const date = props['날짜']?.date?.start || '';
+          const client = props['고객사/프로젝트']?.rich_text?.[0]?.text?.content || '';
+          const summary = props['요약']?.rich_text?.[0]?.text?.content || '';
+          const tags = props['태그']?.multi_select?.map(t => t.name) || [];
+          const linkedSid = props['일정 ID']?.rich_text?.[0]?.text?.content || '';
+          const notionUrl = `https://notion.so/${m.id.replace(/-/g,'')}`;
+
+          const dateDisplay = date ? new Date(date).toLocaleDateString('ko-KR', {
+            year:'numeric', month:'long', day:'numeric', weekday:'short'
+          }) : '';
+
+          return `
+          <div class="card" style="margin-bottom:10px;cursor:default">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start">
+              <div style="flex:1;min-width:0">
+                <div style="font-size:15px;font-weight:700;color:var(--text);margin-bottom:4px">🎙️ ${title}</div>
+                <div style="font-size:12px;color:#64748b;margin-bottom:6px">
+                  ${dateDisplay ? `<span><i class="fas fa-calendar-alt" style="margin-right:3px;color:var(--primary)"></i>${dateDisplay}</span>` : ''}
+                  ${client ? `<span style="margin-left:8px"><i class="fas fa-building" style="margin-right:3px;color:#6366f1"></i>${client}</span>` : ''}
+                  ${linkedSid ? `<span style="margin-left:8px;font-size:11px;background:rgba(99,102,241,0.1);color:#6366f1;padding:1px 7px;border-radius:10px"><i class="fas fa-link" style="margin-right:2px"></i>일정연동</span>` : ''}
+                </div>
+                ${summary ? `<div style="font-size:12px;color:#475569;line-height:1.5;margin-bottom:6px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical">${summary}</div>` : ''}
+                ${tags.length ? `<div style="display:flex;gap:4px;flex-wrap:wrap">${tags.map(t=>`<span class="tag" style="font-size:11px">${t}</span>`).join('')}</div>` : ''}
+              </div>
+              <div style="display:flex;gap:4px;flex-shrink:0;margin-left:8px">
+                <a href="${notionUrl}" target="_blank"
+                  style="background:none;border:1px solid #e2e8f0;border-radius:6px;padding:4px 8px;cursor:pointer;font-size:11px;color:#6366f1;text-decoration:none;display:flex;align-items:center;gap:3px"
+                  title="노션에서 보기"><i class="fas fa-external-link-alt"></i></a>
+              </div>
+            </div>
+          </div>`;
+        }).join('')}`;
+    } catch (e) {
+      el.innerHTML = '<p style="color:#ef4444;text-align:center;padding:20px">로드 실패: ' + e.message + '</p>';
+    }
+  },
+
+  // 일정에서 회의 카테고리 목록 로드 → 회의록 등록 섹션 렌더
+  async _loadMeetingScheduleLinks() {
+    try {
+      const res = await fetch(`/api/schedules?dbId=${this.state.dbIds.schedule}`);
+      const data = await res.json();
+      if (data.object === 'error' || !data.results) return;
+
+      const meetings = data.results.filter(s => {
+        const cat = s.properties?.['카테고리']?.select?.name || '';
+        return cat === '회의';
+      });
+
+      // _scheduleCache 동기화 (회의 카테고리만)
+      if (!this._scheduleCache) this._scheduleCache = {};
+      meetings.forEach(s => {
+        const props = s.properties;
+        this._scheduleCache[s.id] = {
+          title:    props['일정 제목']?.title?.[0]?.text?.content || '제목 없음',
+          datetime: props['날짜/시간']?.date?.start || '',
+          location: props['장소']?.rich_text?.[0]?.text?.content || '',
+          category: props['카테고리']?.select?.name || '',
+          reminder: props['알림']?.select?.name || '',
+          memo:     props['메모']?.rich_text?.[0]?.text?.content || '',
+        };
+      });
+
+      this._meetingScheduleList = meetings;
+    } catch(e) {
+      this._meetingScheduleList = [];
+    }
+  },
+
+  async _renderMeetingScheduleLinks() {
+    const sec = document.getElementById('meeting-schedule-link-section');
+    if (!sec) return;
+
+    const meetings = this._meetingScheduleList || [];
+    if (!meetings.length) { sec.innerHTML = ''; return; }
+
+    const registeredIds = this._meetingScheduleIds || new Set();
+
+    const unregistered = meetings.filter(s => !registeredIds.has(s.id));
+    const registered   = meetings.filter(s => registeredIds.has(s.id));
+
+    if (!unregistered.length && !registered.length) { sec.innerHTML = ''; return; }
+
+    const renderCard = (s, isDone) => {
+      const title = this._scheduleCache?.[s.id]?.title || '제목 없음';
+      const datetimeRaw = this._scheduleCache?.[s.id]?.datetime || '';
+      let dtDisplay = '';
+      if (datetimeRaw) {
+        try { dtDisplay = new Date(datetimeRaw).toLocaleDateString('ko-KR', {month:'short',day:'numeric',weekday:'short'}); } catch(e) {}
+      }
+
+      if (isDone) {
+        return `
+        <div style="display:flex;align-items:center;gap:10px;padding:8px 12px;
+          background:rgba(100,116,139,0.05);border:1px solid #e2e8f0;border-radius:10px;margin-bottom:6px;opacity:0.6">
+          <i class="fas fa-check-circle" style="color:#10b981;font-size:14px;flex-shrink:0"></i>
+          <div style="flex:1;min-width:0">
+            <div style="font-size:13px;font-weight:600;color:#374151">${title}</div>
+            ${dtDisplay ? `<div style="font-size:11px;color:#9ca3af">${dtDisplay}</div>` : ''}
+          </div>
+          <span style="font-size:11px;background:#dcfce7;color:#16a34a;padding:2px 8px;border-radius:10px;font-weight:600;flex-shrink:0">회의록 완료</span>
+        </div>`;
+      } else {
+        return `
+        <div style="display:flex;align-items:center;gap:10px;padding:8px 12px;
+          background:rgba(99,102,241,0.04);border:1px solid rgba(99,102,241,0.25);border-radius:10px;margin-bottom:6px">
+          <i class="fas fa-calendar-check" style="color:#6366f1;font-size:14px;flex-shrink:0"></i>
+          <div style="flex:1;min-width:0">
+            <div style="font-size:13px;font-weight:600;color:#374151">${title}</div>
+            ${dtDisplay ? `<div style="font-size:11px;color:#9ca3af">${dtDisplay}</div>` : ''}
+          </div>
+          <button onclick="MemoNest.showAddMeetingModal('${s.id}', '${title.replace(/'/g, "&#39;")}')"
+            style="flex-shrink:0;background:var(--primary);color:white;border:none;border-radius:8px;padding:5px 10px;cursor:pointer;font-size:11px;font-weight:600">
+            <i class="fas fa-plus"></i> 작성
+          </button>
+        </div>`;
+      }
+    };
+
+    let html = `
+    <div style="margin-bottom:16px">
+      <div style="font-size:12px;font-weight:700;color:#6366f1;margin-bottom:8px;display:flex;align-items:center;gap:6px">
+        <i class="fas fa-calendar-alt"></i> 일정 연동 (회의 카테고리)
+      </div>`;
+
+    if (unregistered.length) {
+      html += `<div style="font-size:11px;color:#94a3b8;margin-bottom:6px">📝 회의록 미작성</div>`;
+      html += unregistered.map(s => renderCard(s, false)).join('');
+    }
+    if (registered.length) {
+      html += `<div style="font-size:11px;color:#94a3b8;margin-bottom:6px;margin-top:${unregistered.length?'10px':'0'}">✅ 회의록 작성 완료</div>`;
+      html += registered.map(s => renderCard(s, true)).join('');
+    }
+
+    html += '</div><hr style="margin-bottom:14px;border:none;border-top:1px solid #f1f5f9">';
+    sec.innerHTML = html;
   },
 
   async toggleRecording(type) {
@@ -1651,81 +1933,6 @@ const MemoNest = {
       } catch (e) { this.toast('STT 변환 실패', 'error'); if (hint) hint.textContent = '버튼을 눌러 녹음 시작'; }
     };
     reader.readAsDataURL(blob);
-  },
-
-  async saveMeeting() {
-    const client = document.getElementById('meeting-client')?.value?.trim();
-    const date = document.getElementById('meeting-date')?.value;
-    const transcript = document.getElementById('stt-text')?.textContent || '';
-    const manualNotes = document.getElementById('meeting-notes')?.value || '';
-
-    if (!transcript && !manualNotes) {
-      this.toast('녹음하거나 메모를 입력해주세요', 'error'); return;
-    }
-    const btn = document.querySelector('.btn-primary[onclick*="saveMeeting"]');
-    if (btn) { btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> AI 처리 중...'; btn.disabled = true; }
-
-    try {
-      const res = await fetch('/api/meetings', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ dbId: this.state.dbIds.meeting, transcript, manualNotes, date, client })
-      });
-      const data = await res.json();
-      this.toast('🎉 회의록이 노션에 저장됐어요!', 'success');
-      if (data.structured) {
-        this.showModal('✅ 회의록 저장 완료', `
-          <div class="ai-card">
-            <div class="ai-label">📝 AI 요약</div>
-            <div class="ai-content">${data.structured.summary || ''}</div>
-          </div>
-          ${data.structured.action_items?.length ? `
-          <div style="margin-top:12px">
-            <div class="section-title">✅ 액션 아이템</div>
-            ${data.structured.action_items.map(i => `<div style="padding:6px 0;font-size:13px;border-bottom:1px solid #f1f5f9">• ${i}</div>`).join('')}
-          </div>` : ''}
-          <div style="margin-top:16px;text-align:center">
-            <a href="https://notion.so" target="_blank" class="notion-link">
-              <i class="fas fa-external-link-alt"></i> 노션에서 전체 회의록 보기
-            </a>
-          </div>`);
-      }
-      document.getElementById('meeting-notes').value = '';
-      const sttEl = document.getElementById('stt-result');
-      if (sttEl) sttEl.style.display = 'none';
-      this.loadMeetings();
-    } catch (e) {
-      this.toast('저장 실패: ' + e.message, 'error');
-      if (btn) { btn.innerHTML = '<i class="fas fa-magic"></i> AI 회의록 생성 & 노션 저장'; btn.disabled = false; }
-    }
-  },
-
-  async loadMeetings() {
-    const el = document.getElementById('meeting-list');
-    if (!el) return;
-    try {
-      const res = await fetch(`/api/meetings?dbId=${this.state.dbIds.meeting}`);
-      const data = await res.json();
-      if (data.object === 'error') {
-        el.innerHTML = `<div style="text-align:center;padding:30px;color:#6b7280">
-          <p style="font-size:32px">🔗</p>
-          <p style="font-weight:600;margin-bottom:8px">노션 DB를 찾을 수 없어요</p>
-          <p style="font-size:12px;color:#9ca3af;margin-bottom:16px">${data.message || 'DB ID가 유효하지 않습니다'}</p>
-          <button class="btn btn-secondary" onclick="MemoNest.recoverFromApp()">🔄 DB 복원 시도</button>
-        </div>`; return;
-      }
-      const results = data.results || [];
-      if (!results.length) { el.innerHTML = '<div class="empty-state"><span class="emoji">🎙️</span><p>아직 회의록이 없어요</p></div>'; return; }
-      el.innerHTML = results.slice(0, 5).map(m => {
-        const props = m.properties;
-        const title = props['회의 제목']?.title?.[0]?.text?.content || '제목 없음';
-        const date = props['날짜']?.date?.start || '';
-        const client = props['고객사/프로젝트']?.rich_text?.[0]?.text?.content || '';
-        return `<div class="card" style="cursor:pointer" onclick="window.open('https://notion.so/${m.id.replace(/-/g,'')}','_blank')">
-          <div style="font-size:14px;font-weight:600">${title}</div>
-          <div style="font-size:12px;color:#64748b;margin-top:4px">${date} ${client ? `· ${client}` : ''}</div>
-        </div>`;
-      }).join('');
-    } catch (e) { el.innerHTML = '<p style="color:#ef4444;text-align:center;padding:20px">로드 실패</p>'; }
   },
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -2563,6 +2770,16 @@ const MemoNest = {
         const gcalBtn = this.state.googleCalTokens
           ? `<button data-sid="${s.id}" onclick="MemoNest.addToGoogleCalendar(this.dataset.sid)" style="background:none;border:1px solid #bfdbfe;border-radius:6px;padding:3px 7px;cursor:pointer;font-size:11px;color:#3b82f6" title="Google Calendar에 추가"><i class="fas fa-calendar-plus"></i></button>`
           : '';
+
+        // 회의 카테고리인 경우 회의록 작성 버튼 표시
+        const isMeeting = category === '회의';
+        const meetingNoteBtn = isMeeting
+          ? `<button data-sid="${s.id}" data-stitle="${title.replace(/"/g,'&quot;')}"
+              onclick="MemoNest.showAddMeetingModal(this.dataset.sid, this.dataset.stitle)"
+              style="background:none;border:1px solid #c7d2fe;border-radius:6px;padding:3px 7px;cursor:pointer;font-size:11px;color:#6366f1"
+              title="회의록 작성"><i class="fas fa-file-alt"></i></button>`
+          : '';
+
         return `
         <div class="card" style="border-color:${borderColor}">
           <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px">
@@ -2570,6 +2787,7 @@ const MemoNest = {
             <div style="display:flex;align-items:center;gap:4px;flex-shrink:0">
               ${badge}
               ${gcalBtn}
+              ${meetingNoteBtn}
               <button data-sid="${s.id}" onclick="MemoNest.showEditScheduleById(this.dataset.sid)"
                 style="background:none;border:1px solid #e2e8f0;border-radius:6px;padding:3px 7px;cursor:pointer;font-size:11px;color:#64748b" title="수정">
                 <i class="fas fa-pen"></i>
