@@ -4,8 +4,15 @@
 const MemoNest = {
   // ── State ──────────────────────────────────────────────────────────────────
   // ── 앱 버전/개발 로그 ─────────────────────────────────────────────────────
-  VERSION: '2.4.0',
+  VERSION: '2.5.0',
   CHANGELOG: [
+    { ver: '2.5.0', date: '2026-09-17', changes: [
+      'Netlify 호스팅 전환 (Notion 데이터 유지)',
+      '버그수정: /api 라우팅 404 문제 해결',
+      '버그수정: 일정탭 회의록 저장 후 목록/노션 반영 + 회의 카드 완료 배지',
+      '일정 타임존(GMT) 선택 기능: 전체화면 설정(단말 자동 감지 기본) + 등록/수정 개별 선택',
+      '일정 연동 회의록 날짜를 해당 일정 날짜로 자동 설정',
+    ] },
     { ver: '2.4.0', date: '2026-09-17', changes: [
       '버그수정: 일정→회의록 저장 후 회의록 리스트 즉시 갱신 (모듈 분기 처리)',
       '버그수정: scheduleId/client 있으면 노션 저장 허용 (빈값 조건 완화)',
@@ -77,6 +84,12 @@ const MemoNest = {
     recordingSeconds: 0,
     currentUser: null,
     googleCalTokens: null,  // { access_token, refresh_token, expires_in, issued_at }
+    // 일정 타임존 오프셋(분). null이면 단말 위치 기반 자동 감지값 사용.
+    // 예: 한국 +540, 미국 동부(EST) -300
+    tzOffset: null,
+    // 웹푸시 알림
+    pushEnabled: false,
+    pushDbId: null,
     sttSettings: {
       enabled: true,
       language: 'ko',
@@ -97,6 +110,11 @@ const MemoNest = {
     this.state.isSetupDone = Object.keys(this.state.dbIds).length === 7;
     this.state.sttSettings = this.load('sttSettings', this.state.sttSettings);
     this.state.googleCalTokens = this.load('googleCalTokens', null);
+    // 타임존 오프셋: 저장값 우선, 없으면 단말 위치(브라우저) 기반 자동 감지
+    this.state.tzOffset = this.load('tzOffset', this._deviceTzOffset());
+    // 웹푸시 상태 복원
+    this.state.pushEnabled = this.load('pushEnabled', false);
+    this.state.pushDbId = this.load('pushDbId', null);
     // Genspark 사용자 정보 로드 (배포 환경)
     await this.loadCurrentUser();
     // Google OAuth 콜백 메시지 수신 리스너 등록
@@ -544,6 +562,7 @@ const MemoNest = {
       if (data.success && data.found === 7) {
         this.state.dbIds = data.databases;
         this.save('dbIds', data.databases);
+        this.save('parentPageId', cleanId);
         this.state.isSetupDone = true;
         document.getElementById('app-modal')?.remove();
         const deletedCount = data.deleted?.length || 0;
@@ -585,6 +604,7 @@ const MemoNest = {
       if (data.success && data.found === 7) {
         this.state.dbIds = data.databases;
         this.save('dbIds', data.databases);
+        this.save('parentPageId', cleanId);
         this.state.isSetupDone = true;
 
         // 결과 메시지 조합
@@ -634,6 +654,7 @@ const MemoNest = {
       if (data.success) {
         this.state.dbIds = data.databases;
         this.save('dbIds', data.databases);
+        this.save('parentPageId', cleanId); // 웹푸시 구독 DB 생성에 필요
         this.state.isSetupDone = true;
         this.toast('🎉 설정 완료! MemoNest를 시작합니다', 'success');
         this.render();
@@ -1552,6 +1573,11 @@ const MemoNest = {
 
   // ── 회의록 추가 팝업 ────────────────────────────────────────────────────
   showAddMeetingModal(scheduleId = null, scheduleTitle = '') {
+    // 일정 연동 시: 해당 일정의 날짜를 회의록 기본 날짜로 사용 (없으면 오늘)
+    const linkedSched = scheduleId ? this._scheduleCache?.[scheduleId] : null;
+    const defaultDate = (linkedSched?.datetime)
+      ? new Date(linkedSched.datetime).toISOString().split('T')[0]
+      : new Date().toISOString().split('T')[0];
     const linkedLabel = scheduleId
       ? `<div style="padding:8px 12px;background:rgba(99,102,241,0.08);border-radius:8px;font-size:12px;color:#6366f1;margin-bottom:14px">
            <i class="fas fa-link"></i> 일정 연동: <strong>${scheduleTitle}</strong>
@@ -1568,7 +1594,7 @@ const MemoNest = {
       </div>
       <div class="form-group">
         <label class="form-label">날짜</label>
-        <input class="form-input" type="date" id="meeting-date" value="${new Date().toISOString().split('T')[0]}">
+        <input class="form-input" type="date" id="meeting-date" value="${defaultDate}">
       </div>
 
       <div class="form-group">
@@ -1674,12 +1700,13 @@ const MemoNest = {
       // 모달 닫기 & 현재 화면 리프레시
       setTimeout(() => {
         document.getElementById('app-modal')?.remove();
-        // 회의록 탭이 열려있으면 리스트 새로고침, 일정 탭이면 연동 섹션 갱신
+        // 회의록 탭이면 회의록 리스트 새로고침,
+        // 일정 탭이면 일정 리스트를 다시 로드해서 회의 카드에 "회의록 완료" 상태 반영
+        // (일정 탭에는 meeting-schedule-link-section DOM이 없으므로 loadSchedules로 재렌더)
         if (this.state.currentModule === 'meeting') {
           this.loadMeetings();
         } else if (this.state.currentModule === 'schedule') {
-          // 일정 탭에서 연동 섹션만 업데이트 (전체 재렌더 없이)
-          this._renderMeetingScheduleLinks();
+          this.loadSchedules();
         }
       }, 1500);
 
@@ -2026,16 +2053,24 @@ const MemoNest = {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ audioBase64: base64, mimeType: actualMime, language: this.state.sttSettings.language })
         });
-        const data = await res.json();
-        if (data.text) {
+        const data = await res.json().catch(() => ({}));
+        if (data.text && data.text.trim()) {
           const sttResult = document.getElementById('stt-result');
           const sttText = document.getElementById('stt-text');
           if (sttResult) sttResult.style.display = 'block';
           if (sttText) sttText.textContent = data.text;
           if (hint) hint.textContent = 'STT 변환 완료! 다시 녹음하려면 클릭';
           this.toast('🎙️ STT 변환 완료!', 'success');
+        } else {
+          // 서버가 준 실제 원인 표시 (키 미설정 / 빈 녹음 / Groq 오류 등)
+          const reason = data.error || '변환된 텍스트가 비어 있어요 (마이크 입력을 확인해주세요)';
+          this.toast('STT 변환 실패: ' + reason, 'error', 5000);
+          if (hint) hint.textContent = '버튼을 눌러 다시 녹음';
         }
-      } catch (e) { this.toast('STT 변환 실패', 'error'); if (hint) hint.textContent = '버튼을 눌러 녹음 시작'; }
+      } catch (e) {
+        this.toast('STT 변환 실패: ' + (e.message || '네트워크 오류'), 'error', 5000);
+        if (hint) hint.textContent = '버튼을 눌러 녹음 시작';
+      }
     };
     reader.readAsDataURL(blob);
   },
@@ -2821,6 +2856,8 @@ const MemoNest = {
     // GCal 배너 + 2분할 레이아웃
     const isPC = this.isPC();
     return `
+    ${this._renderTzBar()}
+    ${this._renderPushBanner()}
     ${this._renderGCalBanner()}
     <div id="schedule-split" style="display:${isPC?'grid':'block'};grid-template-columns:1fr 1fr;gap:16px;min-height:0;${isPC?'':''}">
       <!-- 왼쪽: 캘린더 -->
@@ -2879,6 +2916,10 @@ const MemoNest = {
         };
       });
 
+      // 회의록 연동 상태 로드 → 일정 카드에 "회의록 완료/작성" 구분 표시용
+      // (일정 탭에서도 어떤 회의 일정에 회의록이 등록됐는지 알아야 함)
+      await this._loadLinkedMeetingIds();
+
       // 캘린더 렌더
       this._renderCalendar();
 
@@ -2887,6 +2928,24 @@ const MemoNest = {
 
     } catch (e) {
       el.innerHTML = '<p style="color:#ef4444;text-align:center;padding:20px">로드 실패: ' + e.message + '</p>';
+    }
+  },
+
+  // ── 회의록에 연동된 일정 ID Set 로드 (일정 탭에서 회의록 완료 여부 표시용) ──
+  async _loadLinkedMeetingIds() {
+    try {
+      if (!this.state.dbIds.meeting) { this._meetingScheduleIds = new Set(); return; }
+      const res = await fetch(`/api/meetings?dbId=${this.state.dbIds.meeting}`);
+      const data = await res.json();
+      if (data.object === 'error' || !data.results) { this._meetingScheduleIds = new Set(); return; }
+      this._meetingScheduleIds = new Set(
+        data.results
+          .map(m => m.properties?.['일정 ID']?.rich_text?.[0]?.text?.content || '')
+          .filter(Boolean)
+      );
+    } catch (e) {
+      // 실패해도 일정 렌더는 계속 (연동 배지만 생략)
+      if (!this._meetingScheduleIds) this._meetingScheduleIds = new Set();
     }
   },
 
@@ -3156,25 +3215,29 @@ const MemoNest = {
         const isPast = dt && dt < now;
 
         let timeStr = '';
-        if (dt) {
-          timeStr = dt.toLocaleString('ko-KR', {
-            month:'short', day:'numeric', weekday:'short',
-            hour:'2-digit', minute:'2-digit', hour12:false
-          });
-          if (dtEnd) {
-            timeStr += ' ~ ' + dtEnd.toLocaleTimeString('ko-KR', { hour:'2-digit', minute:'2-digit', hour12:false });
+        if (s.datetime) {
+          // 선택된 일정 타임존 기준으로 표시
+          timeStr = this._fmtSchedTime(s.datetime, true);
+          if (s.endDatetime) {
+            timeStr += ' ~ ' + this._fmtSchedTime(s.endDatetime, false);
           }
+          timeStr += ` <span style="font-size:10px;color:#94a3b8">${this._fmtOffset(this._activeTzOffset())}</span>`;
         }
 
         const gcalBtn = this.state.googleCalTokens
           ? `<button data-sid="${sid}" onclick="MemoNest.addToGoogleCalendar(this.dataset.sid)" style="background:none;border:1px solid ${cs.border};border-radius:6px;padding:3px 7px;cursor:pointer;font-size:11px;color:${cs.tag}" title="Google Calendar에 추가"><i class="fas fa-calendar-plus"></i></button>`
           : '';
         const isMeeting = s.category === '회의';
-        const meetingNoteBtn = isMeeting
-          ? `<button data-sid="${sid}" data-stitle="${s.title.replace(/"/g,'&quot;')}"
-              onclick="MemoNest.showAddMeetingModal(this.dataset.sid, this.dataset.stitle)"
-              style="background:none;border:1px solid ${cs.border};border-radius:6px;padding:3px 7px;cursor:pointer;font-size:11px;color:${cs.tag}"
-              title="회의록 작성"><i class="fas fa-file-alt"></i></button>` : '';
+        const hasMeetingNote = isMeeting && (this._meetingScheduleIds?.has(sid));
+        const meetingNoteBtn = !isMeeting
+          ? ''
+          : hasMeetingNote
+            ? `<span style="display:inline-flex;align-items:center;gap:3px;background:#dcfce7;color:#16a34a;border:1px solid #86efac;border-radius:6px;padding:3px 7px;font-size:11px;font-weight:600" title="회의록 등록 완료">
+                <i class="fas fa-check-circle"></i> 회의록</span>`
+            : `<button data-sid="${sid}" data-stitle="${s.title.replace(/"/g,'&quot;')}"
+                onclick="MemoNest.showAddMeetingModal(this.dataset.sid, this.dataset.stitle)"
+                style="background:none;border:1px solid ${cs.border};border-radius:6px;padding:3px 7px;cursor:pointer;font-size:11px;color:${cs.tag}"
+                title="회의록 작성"><i class="fas fa-file-alt"></i></button>`;
 
         return `
         <div class="sch-card-anim" style="margin-bottom:8px;padding:10px 12px;border-radius:12px;
@@ -3216,33 +3279,19 @@ const MemoNest = {
   },
 
   showEditSchedule(pageId, title, datetimeRaw, location, category, reminder, memo, endDatetimeRaw) {
-    // raw → datetime-local 형식 변환 공통 헬퍼
-    const _toLocalVal = raw => {
-      if (!raw) return '';
-      try {
-        const dt = new Date(raw);
-        const pad = n => String(n).padStart(2,'0');
-        return `${dt.getFullYear()}-${pad(dt.getMonth()+1)}-${pad(dt.getDate())}T${pad(dt.getHours())}:${pad(dt.getMinutes())}`;
-      } catch(e) { return raw.slice(0,16); }
-    };
-    const localVal    = _toLocalVal(datetimeRaw);
-    const endLocalVal = _toLocalVal(endDatetimeRaw);
-    const gmtStr = this.getGMTOffsetStr();
+    // 시작 Date + 초기 소요시간(분) 산출
+    const startDate = datetimeRaw ? new Date(datetimeRaw) : new Date();
+    let durationMin = 60;
+    if (datetimeRaw && endDatetimeRaw) {
+      const diff = Math.round((new Date(endDatetimeRaw).getTime() - new Date(datetimeRaw).getTime())/60000);
+      if (diff > 0) durationMin = diff;
+    }
     this.showModal('✏️ 일정 수정', `
       <div class="form-group">
         <label class="form-label">일정 제목 *</label>
         <input class="form-input" id="edit-sch-title" value="${title}">
       </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
-        <div class="form-group">
-          <label class="form-label">시작 시간 <span style="font-size:11px;color:var(--primary)">${gmtStr}</span></label>
-          <input class="form-input" type="datetime-local" id="edit-sch-datetime" value="${localVal}">
-        </div>
-        <div class="form-group">
-          <label class="form-label">종료 시간 <span style="font-size:11px;color:var(--text-muted)">선택</span></label>
-          <input class="form-input" type="datetime-local" id="edit-sch-end-datetime" value="${endLocalVal}">
-        </div>
-      </div>
+      ${this._renderSchedTimeControls('edit-sch', startDate, durationMin)}
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
         <div class="form-group">
           <label class="form-label">카테고리</label>
@@ -3276,6 +3325,8 @@ const MemoNest = {
       <button class="btn btn-primary btn-block" onclick="MemoNest.saveEditSchedule('${pageId}')">
         <i class="fas fa-save"></i> 수정 저장
       </button>`, null);
+    // 시작/종료/소요시간 양방향 연동 배선
+    this._wireSchedTime('edit-sch');
     // 기존 location 파싱 → 각 필드에 채우기 + hint 표시
     if (location) {
       const { place, link } = this._parseLocation(location);
@@ -3296,15 +3347,9 @@ const MemoNest = {
   async saveEditSchedule(pageId) {
     const btn = document.querySelector('#app-modal .btn-primary');
     if (btn) { btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 저장 중...'; btn.disabled = true; }
-    const _toISO = val => {
-      if (!val) return null;
-      const offset = -new Date().getTimezoneOffset();
-      const sign = offset >= 0 ? '+' : '-';
-      const h = Math.floor(Math.abs(offset)/60), m = Math.abs(offset)%60;
-      return `${val}:00${sign}${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`;
-    };
-    const datetimeISO    = _toISO(document.getElementById('edit-sch-datetime')?.value);
-    const endDatetimeISO = _toISO(document.getElementById('edit-sch-end-datetime')?.value || '');
+    const tzOff = this._readTz('edit-sch');
+    const datetimeISO    = this._dateToISO(this._readStartDate('edit-sch'), tzOff);
+    const endDatetimeISO = this._dateToISO(this._readEndDate('edit-sch'), tzOff);
     try {
       await fetch(`/api/schedules/${pageId}`, {
         method: 'PATCH', headers: { 'Content-Type': 'application/json' },
@@ -3345,14 +3390,233 @@ const MemoNest = {
     return `${date.getFullYear()}-${pad(date.getMonth()+1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
   },
 
-  // ── 현재 단말 GMT 오프셋 문자열 반환 ──────────────────────────────────────
-  getGMTOffsetStr() {
-    const offset = -new Date().getTimezoneOffset(); // 분 단위
-    const sign = offset >= 0 ? '+' : '-';
-    const abs = Math.abs(offset);
-    const h = Math.floor(abs / 60);
-    const m = abs % 60;
+  // ══════════════════════════════════════════════════════════════════════════
+  // 타임존(GMT 오프셋) 관리
+  // - 단말 위치(브라우저) 기반 자동 감지가 기본값
+  // - 일정 전체화면에서 선택 → state.tzOffset(분) 저장(localStorage)
+  // - 일정 등록/수정 시 그 값이 기본값으로 적용, 개별 변경 가능
+  // ══════════════════════════════════════════════════════════════════════════
+
+  // 단말(브라우저) 위치 기반 오프셋(분). 예: 한국 +540
+  _deviceTzOffset() {
+    return -new Date().getTimezoneOffset();
+  },
+
+  // 현재 적용 중인 오프셋(분). state 값이 없으면 단말값.
+  _activeTzOffset() {
+    return (this.state.tzOffset === null || this.state.tzOffset === undefined)
+      ? this._deviceTzOffset()
+      : this.state.tzOffset;
+  },
+
+  // 분 오프셋 → "GMT+09:00" 형식
+  _fmtOffset(min) {
+    const sign = min >= 0 ? '+' : '-';
+    const abs = Math.abs(min);
+    const h = Math.floor(abs / 60), m = abs % 60;
     return `GMT${sign}${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`;
+  },
+
+  // 선택 가능한 오프셋 목록(분). 주요 타임존 위주 (GMT-12 ~ GMT+14, 일부 30/45분).
+  _tzOffsetOptions: [
+    -720, -660, -600, -540, -480, -420, -360, -300, -240, -210, -180, -120, -60,
+    0, 60, 120, 180, 210, 240, 270, 300, 330, 345, 360, 390, 420, 480, 525, 540, 570, 600, 660, 720, 780, 840,
+  ],
+
+  // 대표 도시 라벨 (선택 UI 가독성용)
+  _tzLabel(min) {
+    const named = {
+      '-480': '미국 서부(LA)', '-420': '미국 산악', '-360': '미국 중부', '-300': '미국 동부(NY)',
+      '0': '런던(UTC)', '60': '파리/베를린', '180': '모스크바',
+      '480': '베이징/홍콩', '540': '서울/도쿄', '570': '애들레이드', '600': '시드니',
+      '330': '인도', '345': '네팔',
+    };
+    const base = this._fmtOffset(min);
+    return named[String(min)] ? `${base} · ${named[String(min)]}` : base;
+  },
+
+  // GMT select 옵션 HTML
+  _tzSelectOptions(selectedMin) {
+    // 목록에 없는 값(단말 특수 오프셋)도 포함되도록 보정
+    const opts = this._tzOffsetOptions.includes(selectedMin)
+      ? this._tzOffsetOptions
+      : [...this._tzOffsetOptions, selectedMin].sort((a,b)=>a-b);
+    return opts.map(m => `<option value="${m}" ${m===selectedMin?'selected':''}>${this._tzLabel(m)}</option>`).join('');
+  },
+
+  // 일정 전체화면에서 타임존 변경 → 저장 + 리스트/캘린더 갱신
+  setScheduleTz(minStr) {
+    const min = parseInt(minStr, 10);
+    if (Number.isNaN(min)) return;
+    this.state.tzOffset = min;
+    this.save('tzOffset', min);
+    this.toast(`타임존을 ${this._fmtOffset(min)}(으)로 변경했어요`, 'info');
+    // 표시 갱신 (선택 타임존 기준으로 리스트/캘린더 재렌더)
+    this._renderCalendar();
+    this._renderScheduleList();
+  },
+
+  // 일정 상단 타임존 선택 바 HTML
+  _renderTzBar() {
+    const active = this._activeTzOffset();
+    const isAuto = (this.state.tzOffset === null || this.state.tzOffset === undefined);
+    return `
+    <div style="display:flex;align-items:center;gap:8px;padding:8px 12px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;margin-bottom:10px">
+      <span style="font-size:13px">🌐</span>
+      <span style="font-size:12px;color:#64748b;white-space:nowrap">일정 타임존</span>
+      <select class="form-select" id="sched-tz-select" onchange="MemoNest.setScheduleTz(this.value)"
+        style="flex:1;min-width:0;padding:6px 8px;font-size:12px">
+        ${this._tzSelectOptions(active)}
+      </select>
+      ${isAuto ? `<span style="font-size:10px;color:#94a3b8;white-space:nowrap">📍 단말 위치 자동</span>` : ''}
+    </div>`;
+  },
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // WEB PUSH 알림 (Android / 데스크톱 / iOS 공통)
+  // - Android·데스크톱: 브라우저에서 바로 동작
+  // - iOS(16.4+): "홈 화면에 추가"(PWA 설치) 후에만 동작 → 안내 배너 표시
+  // ══════════════════════════════════════════════════════════════════════════
+
+  // iOS Safari 여부
+  _isIOS() {
+    return /iP(hone|ad|od)/.test(navigator.userAgent)
+      || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  },
+  // PWA(홈화면 추가)로 실행 중인지
+  _isStandalone() {
+    return window.matchMedia?.('(display-mode: standalone)').matches
+      || window.navigator.standalone === true;
+  },
+  // 웹푸시 지원 환경 여부
+  _pushSupported() {
+    return 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+  },
+
+  // VAPID 공개키(base64url) → Uint8Array
+  _urlB64ToUint8Array(base64String) {
+    const padding = '='.repeat((4 - base64String.length % 4) % 4);
+    const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+    const raw = atob(base64);
+    const arr = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) arr[i] = raw.charCodeAt(i);
+    return arr;
+  },
+
+  // 알림 켜기: 권한 요청 → 구독 → 서버 저장
+  async enableNotifications() {
+    if (!this._pushSupported()) {
+      this.toast('이 브라우저는 웹푸시를 지원하지 않아요.', 'error'); return;
+    }
+    // iOS 는 홈화면 추가(PWA) 필요
+    if (this._isIOS() && !this._isStandalone()) {
+      this.showModal('📲 아이폰 알림 설정', `
+        <div style="font-size:13px;line-height:1.7;color:#374151">
+          아이폰(iOS)에서는 알림을 받으려면 <b>홈 화면에 추가</b>해야 해요.<br><br>
+          1. Safari 하단 <b>공유</b> 버튼 <i class="fas fa-arrow-up-from-bracket"></i> 탭<br>
+          2. <b>"홈 화면에 추가"</b> 선택<br>
+          3. 홈 화면의 <b>MemoNest 아이콘</b>으로 다시 실행<br>
+          4. 그 화면에서 다시 <b>알림 켜기</b>
+        </div>`, null);
+      return;
+    }
+    try {
+      const perm = await Notification.requestPermission();
+      if (perm !== 'granted') { this.toast('알림 권한이 거부됐어요.', 'error'); return; }
+
+      const reg = await navigator.serviceWorker.ready;
+      // VAPID 공개키 수신
+      const vres = await fetch('/api/push/vapid-public');
+      const vdata = await vres.json();
+      if (!vdata.publicKey) { this.toast('서버 알림 설정(VAPID)이 아직 안 됐어요.', 'error'); return; }
+
+      // 기존 구독 재사용 or 신규
+      let sub = await reg.pushManager.getSubscription();
+      if (!sub) {
+        sub = await reg.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: this._urlB64ToUint8Array(vdata.publicKey),
+        });
+      }
+
+      // 서버 저장 (parentPageId 는 setup 때 저장한 루트 페이지)
+      const res = await fetch('/api/push/subscribe', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          parentPageId: this.load('parentPageId', ''),
+          subscription: sub.toJSON(),
+          scheduleDbId: this.state.dbIds.schedule || '',
+          userAgent: navigator.userAgent,
+        }),
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+
+      this.state.pushEnabled = true;
+      this.state.pushDbId = data.pushDbId || null;
+      this.save('pushEnabled', true);
+      this.save('pushDbId', this.state.pushDbId);
+
+      this.toast('🔔 알림을 켰어요! 테스트 알림을 보냈어요.', 'success', 4000);
+      // 테스트 발송
+      fetch('/api/push/test', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ subscription: sub.toJSON() }),
+      }).catch(() => {});
+
+      if (this.state.currentModule === 'schedule') this._renderPushBar?.();
+      this.render();
+    } catch (e) {
+      this.toast('알림 설정 실패: ' + e.message, 'error');
+    }
+  },
+
+  // 알림 끄기
+  async disableNotifications() {
+    try {
+      const reg = await navigator.serviceWorker.ready;
+      const sub = await reg.pushManager.getSubscription();
+      if (sub) {
+        await fetch('/api/push/unsubscribe', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pushDbId: this.state.pushDbId, endpoint: sub.endpoint }),
+        }).catch(() => {});
+        await sub.unsubscribe().catch(() => {});
+      }
+    } catch (_) {}
+    this.state.pushEnabled = false;
+    this.save('pushEnabled', false);
+    this.toast('알림을 껐어요.', 'info');
+    this.render();
+  },
+
+  // 일정 화면 알림 배너
+  _renderPushBanner() {
+    if (!this._pushSupported()) return '';
+    const on = this.state.pushEnabled;
+    const iosNeedInstall = this._isIOS() && !this._isStandalone();
+    return `
+    <div style="display:flex;align-items:center;gap:10px;padding:10px 14px;background:${on?'#f0fdf4':'#fafafa'};border:1px solid ${on?'#bbf7d0':'#e5e7eb'};border-radius:12px;margin-bottom:10px">
+      <span style="font-size:18px">🔔</span>
+      <div style="flex:1;min-width:0">
+        <div style="font-size:13px;font-weight:600;color:${on?'#16a34a':'#374151'}">
+          일정 알림 ${on ? '켜짐' : '꺼짐'}
+        </div>
+        <div style="font-size:11px;color:#6b7280">
+          ${iosNeedInstall
+            ? '아이폰은 홈 화면에 추가 후 사용할 수 있어요'
+            : '일정 시작 전(알림 설정 기준)에 폰·PC로 알려드려요'}
+        </div>
+      </div>
+      ${on
+        ? `<button onclick="MemoNest.disableNotifications()" style="white-space:nowrap;background:none;border:1px solid #e2e8f0;border-radius:8px;padding:6px 12px;font-size:12px;color:#6b7280;cursor:pointer">알림 끄기</button>`
+        : `<button onclick="MemoNest.enableNotifications()" style="white-space:nowrap;background:var(--primary);color:white;border:none;border-radius:8px;padding:6px 12px;font-size:12px;font-weight:600;cursor:pointer">알림 켜기</button>`}
+    </div>`;
+  },
+
+  // ── 적용 타임존 기준 GMT 문자열 (모달 라벨용) ─────────────────────────────
+  getGMTOffsetStr() {
+    return this._fmtOffset(this._activeTzOffset());
   },
 
   // ── 타임존 이름 반환 ──────────────────────────────────────────────────────
@@ -3362,10 +3626,203 @@ const MemoNest = {
     } catch { return ''; }
   },
 
+  // ══════════════════════════════════════════════════════════════════════════
+  // 일정 시간 컨트롤 (날짜 + 시 + 10분단위 분 + 소요시간, 시작/종료/소요 양방향 연동)
+  // Outlook 스타일: 분은 10분 단위, 시작 이후로 종료 자동, 소요시간과 상호 연동
+  // ══════════════════════════════════════════════════════════════════════════
+
+  // 소요시간 옵션(분). 라벨은 시간/분 혼합 표기
+  _durationOptions: [10, 20, 30, 40, 50, 60, 90, 120, 150, 180, 240, 300, 360, 480, 600, 720, 1440],
+
+  _fmtDuration(min) {
+    if (min < 60) return `${min}분`;
+    if (min % 60 === 0) return `${min/60}시간`;
+    return `${Math.floor(min/60)}시간 ${min%60}분`;
+  },
+
+  // Date → { date:'YYYY-MM-DD', hour:0-23, min:0-50(10단위) }
+  _splitDateParts(d) {
+    const pad = n => String(n).padStart(2,'0');
+    const min10 = Math.round(d.getMinutes()/10)*10; // 10분 단위 반올림
+    let hour = d.getHours();
+    let dd = new Date(d);
+    if (min10 === 60) { // 반올림으로 60이 되면 다음 시간 00분
+      dd.setHours(dd.getHours()+1); hour = dd.getHours();
+    }
+    const minute = min10 === 60 ? 0 : min10;
+    return {
+      date: `${dd.getFullYear()}-${pad(dd.getMonth()+1)}-${pad(dd.getDate())}`,
+      hour,
+      min: minute,
+    };
+  },
+
+  // 시/분 select 옵션 HTML
+  _hourOptions(sel) {
+    let h = '';
+    for (let i=0;i<24;i++) h += `<option value="${i}" ${i===sel?'selected':''}>${String(i).padStart(2,'0')}시</option>`;
+    return h;
+  },
+  _minuteOptions(sel) {
+    let h = '';
+    for (let m=0;m<60;m+=10) h += `<option value="${m}" ${m===sel?'selected':''}>${String(m).padStart(2,'0')}분</option>`;
+    return h;
+  },
+
+  // 시간 컨트롤 HTML 생성 (prefix로 add/edit 구분: 'sch' | 'edit-sch')
+  // startDate: Date(시작), durationMin: 초기 소요(분)
+  _renderSchedTimeControls(prefix, startDate, durationMin) {
+    const s = this._splitDateParts(startDate);
+    const dur = durationMin || 60;
+    const durSelected = this._durationOptions.includes(dur) ? dur : 60;
+    const durOpts = this._durationOptions
+      .map(m => `<option value="${m}" ${m===durSelected?'selected':''}>${this._fmtDuration(m)}</option>`)
+      .join('');
+    const endDate = new Date(startDate.getTime() + durSelected*60000);
+    const e = this._splitDateParts(endDate);
+    // 모달의 기본 타임존 = 일정 전체화면에 설정된(또는 단말 자동) 값
+    const activeTz = this._activeTzOffset();
+
+    const selStyle = 'padding:8px 6px';
+    return `
+    <div class="form-group">
+      <label class="form-label">🌐 타임존 <span style="font-size:11px;color:var(--text-muted)">(기본값: 일정 화면 설정)</span></label>
+      <select class="form-select" id="${prefix}-tz" style="${selStyle}">${this._tzSelectOptions(activeTz)}</select>
+    </div>
+    <div class="form-group">
+      <label class="form-label">시작 시간</label>
+      <div style="display:grid;grid-template-columns:1.4fr 1fr 1fr;gap:6px">
+        <input class="form-input" type="date" id="${prefix}-start-date" value="${s.date}" style="${selStyle}">
+        <select class="form-select" id="${prefix}-start-hour" style="${selStyle}">${this._hourOptions(s.hour)}</select>
+        <select class="form-select" id="${prefix}-start-min" style="${selStyle}">${this._minuteOptions(s.min)}</select>
+      </div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">소요 시간</label>
+      <select class="form-select" id="${prefix}-duration">${durOpts}</select>
+    </div>
+    <div class="form-group">
+      <label class="form-label">종료 시간 <span style="font-size:11px;color:var(--text-muted)">(시작·소요와 자동 연동)</span></label>
+      <div style="display:grid;grid-template-columns:1.4fr 1fr 1fr;gap:6px">
+        <input class="form-input" type="date" id="${prefix}-end-date" value="${e.date}" style="${selStyle}">
+        <select class="form-select" id="${prefix}-end-hour" style="${selStyle}">${this._hourOptions(e.hour)}</select>
+        <select class="form-select" id="${prefix}-end-min" style="${selStyle}">${this._minuteOptions(e.min)}</select>
+      </div>
+    </div>`;
+  },
+
+  // 모달에서 선택된 타임존 오프셋(분). 없으면 활성 타임존.
+  _readTz(prefix) {
+    const v = document.getElementById(`${prefix}-tz`)?.value;
+    const n = parseInt(v, 10);
+    return Number.isNaN(n) ? this._activeTzOffset() : n;
+  },
+
+  // 세 그룹(시작/소요/종료) 값 읽어 Date 객체로
+  _readStartDate(prefix) {
+    const d = document.getElementById(`${prefix}-start-date`)?.value;
+    const h = parseInt(document.getElementById(`${prefix}-start-hour`)?.value || '0', 10);
+    const m = parseInt(document.getElementById(`${prefix}-start-min`)?.value || '0', 10);
+    if (!d) return null;
+    const [y, mo, day] = d.split('-').map(Number);
+    return new Date(y, mo-1, day, h, m, 0, 0);
+  },
+  _readEndDate(prefix) {
+    const d = document.getElementById(`${prefix}-end-date`)?.value;
+    const h = parseInt(document.getElementById(`${prefix}-end-hour`)?.value || '0', 10);
+    const m = parseInt(document.getElementById(`${prefix}-end-min`)?.value || '0', 10);
+    if (!d) return null;
+    const [y, mo, day] = d.split('-').map(Number);
+    return new Date(y, mo-1, day, h, m, 0, 0);
+  },
+  _setDateParts(prefix, which, dt) {
+    const p = this._splitDateParts(dt);
+    const dEl = document.getElementById(`${prefix}-${which}-date`);
+    const hEl = document.getElementById(`${prefix}-${which}-hour`);
+    const mEl = document.getElementById(`${prefix}-${which}-min`);
+    if (dEl) dEl.value = p.date;
+    if (hEl) hEl.value = String(p.hour);
+    if (mEl) mEl.value = String(p.min);
+  },
+
+  // 시작/소요/종료 3자 양방향 연동 이벤트 배선
+  _wireSchedTime(prefix) {
+    const ids = {
+      start: [`${prefix}-start-date`, `${prefix}-start-hour`, `${prefix}-start-min`],
+      end:   [`${prefix}-end-date`, `${prefix}-end-hour`, `${prefix}-end-min`],
+      dur:   `${prefix}-duration`,
+    };
+    // 시작 or 소요 변경 → 종료 재계산
+    const recalcEndFromStartDur = () => {
+      const start = this._readStartDate(prefix);
+      const dur = parseInt(document.getElementById(ids.dur)?.value || '60', 10);
+      if (!start) return;
+      this._setDateParts(prefix, 'end', new Date(start.getTime() + dur*60000));
+    };
+    // 종료 변경 → 소요 재계산 (음수면 시작을 종료-현재소요로 당김)
+    const recalcDurFromStartEnd = () => {
+      const start = this._readStartDate(prefix);
+      const end = this._readEndDate(prefix);
+      if (!start || !end) return;
+      let diff = Math.round((end.getTime() - start.getTime())/60000);
+      if (diff <= 0) {
+        // 종료가 시작보다 이르면: 시작을 종료 - (기존 소요)로 이동
+        const dur = parseInt(document.getElementById(ids.dur)?.value || '60', 10);
+        this._setDateParts(prefix, 'start', new Date(end.getTime() - dur*60000));
+        return;
+      }
+      const durEl = document.getElementById(ids.dur);
+      if (durEl) {
+        // 정확히 매칭되는 옵션 없으면 가장 가까운 옵션 선택
+        if (this._durationOptions.includes(diff)) durEl.value = String(diff);
+        else {
+          const nearest = this._durationOptions.reduce((a,b)=>Math.abs(b-diff)<Math.abs(a-diff)?b:a);
+          durEl.value = String(nearest);
+          // 옵션이 실제 diff와 다르면 종료를 옵션에 맞춰 재정렬
+          this._setDateParts(prefix, 'end', new Date(start.getTime() + nearest*60000));
+        }
+      }
+    };
+    ids.start.forEach(id => document.getElementById(id)?.addEventListener('change', recalcEndFromStartDur));
+    document.getElementById(ids.dur)?.addEventListener('change', recalcEndFromStartDur);
+    ids.end.forEach(id => document.getElementById(id)?.addEventListener('change', recalcDurFromStartEnd));
+  },
+
+  // 절대시각 ISO 문자열을 "선택 타임존" 기준 벽시계 Date로 변환 (표시용)
+  // toLocaleString은 브라우저 tz로 표시하므로, 선택 tz를 반영하려면 오프셋만큼 시프트한
+  // Date를 만들어 getUTC* 로 읽는다.
+  _instantInTz(iso, offsetMin) {
+    if (!iso) return null;
+    const off = (offsetMin === undefined || offsetMin === null) ? this._activeTzOffset() : offsetMin;
+    const utcMs = new Date(iso).getTime();
+    return new Date(utcMs + off * 60000); // 이 Date의 getUTC* 가 선택 tz 벽시계값
+  },
+
+  // 선택 타임존 기준 날짜/시간 라벨
+  _fmtSchedTime(iso, withDate = true) {
+    const d = this._instantInTz(iso);
+    if (!d) return '';
+    const pad = n => String(n).padStart(2,'0');
+    const wk = ['일','월','화','수','목','금','토'][d.getUTCDay()];
+    const hm = `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
+    if (!withDate) return hm;
+    return `${d.getUTCMonth()+1}월 ${d.getUTCDate()}일(${wk}) ${hm}`;
+  },
+
+  // 벽시계 Date + 선택 타임존 오프셋(분) → ISO 8601
+  // dt의 연/월/일/시/분(사용자가 select로 고른 벽시계 값)을 그대로 쓰고,
+  // 오프셋만 선택 타임존(offsetMin)으로 붙인다. (device 오프셋 아님)
+  _dateToISO(dt, offsetMin) {
+    if (!dt) return null;
+    const pad = n => String(n).padStart(2,'0');
+    const offset = (offsetMin === undefined || offsetMin === null) ? this._activeTzOffset() : offsetMin;
+    const sign = offset >= 0 ? '+' : '-';
+    const oh = Math.floor(Math.abs(offset)/60), om = Math.abs(offset)%60;
+    return `${dt.getFullYear()}-${pad(dt.getMonth()+1)}-${pad(dt.getDate())}T${pad(dt.getHours())}:${pad(dt.getMinutes())}:00${sign}${pad(oh)}:${pad(om)}`;
+  },
+
   showAddSchedule() {
     const now = new Date();
-    const localStr = this.getLocalDatetimeStr(now);
-    const gmtStr = this.getGMTOffsetStr();
     const tzName = this.getTimezoneName();
 
     this.showModal('📅 일정 추가', `
@@ -3373,26 +3830,9 @@ const MemoNest = {
         <label class="form-label">일정 제목 *</label>
         <input class="form-input" id="sch-title" placeholder="일정 제목">
       </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
-        <div class="form-group">
-          <label class="form-label">
-            시작 시간
-            <span style="font-size:10px;font-weight:400;color:var(--primary);margin-left:4px;background:rgba(99,102,241,0.1);padding:1px 6px;border-radius:20px">
-              🌐 ${gmtStr}
-            </span>
-          </label>
-          <input class="form-input" type="datetime-local" id="sch-datetime" value="${localStr}">
-        </div>
-        <div class="form-group">
-          <label class="form-label">
-            종료 시간
-            <span style="font-size:10px;font-weight:400;color:var(--text-muted);margin-left:4px">선택</span>
-          </label>
-          <input class="form-input" type="datetime-local" id="sch-end-datetime">
-        </div>
-      </div>
-      <div style="font-size:11px;color:var(--text-muted);margin-top:-8px;margin-bottom:10px">
-        ⏰ 단말 로컬 시간(${tzName}) 기준 저장
+      ${this._renderSchedTimeControls('sch', now, 60)}
+      <div style="font-size:11px;color:var(--text-muted);margin-top:-4px;margin-bottom:10px">
+        ⏰ 단말 로컬 시간(${tzName}) 기준 저장 · 분은 10분 단위
       </div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
         <div class="form-group">
@@ -3429,6 +3869,8 @@ const MemoNest = {
       <button class="btn btn-primary btn-block" onclick="MemoNest.saveSchedule()">
         <i class="fas fa-save"></i> 저장하기
       </button>`);
+    // 시작/종료/소요시간 양방향 연동 배선
+    this._wireSchedTime('sch');
   },
 
   async saveSchedule() {
@@ -3437,17 +3879,11 @@ const MemoNest = {
     const btn = document.querySelector('#app-modal .btn-primary');
     if (btn) { btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 저장 중...'; btn.disabled = true; }
 
-    // 로컬 시간 → ISO 8601 (타임존 오프셋 포함) 공통 헬퍼
-    const _toISO = val => {
-      if (!val) return null;
-      const offset = -new Date().getTimezoneOffset();
-      const sign = offset >= 0 ? '+' : '-';
-      const h = Math.floor(Math.abs(offset) / 60);
-      const m = Math.abs(offset) % 60;
-      return `${val}:00${sign}${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`;
-    };
-    const datetimeISO    = _toISO(document.getElementById('sch-datetime')?.value);
-    const endDatetimeISO = _toISO(document.getElementById('sch-end-datetime')?.value || '');
+    const startDate = this._readStartDate('sch');
+    const endDate   = this._readEndDate('sch');
+    const tzOff = this._readTz('sch');
+    const datetimeISO    = this._dateToISO(startDate, tzOff);
+    const endDatetimeISO = this._dateToISO(endDate, tzOff);
 
     try {
       await fetch('/api/schedules', {

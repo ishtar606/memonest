@@ -1,6 +1,5 @@
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
-import { serveStatic } from 'hono/cloudflare-workers'
 
 type Bindings = {
   NOTION_API_KEY: string
@@ -8,9 +7,32 @@ type Bindings = {
   GROQ_API_KEY: string
   GOOGLE_CLIENT_ID: string
   GOOGLE_CLIENT_SECRET: string
+  // 선택: 배포 도메인 명시 오버라이드 (없으면 요청 Origin 기반 자동 산출)
+  APP_BASE_URL?: string
+  // Web Push (VAPID) — 값은 Netlify 환경변수로만 주입, 코드 하드코딩 금지
+  VAPID_PUBLIC_KEY?: string
+  VAPID_PRIVATE_KEY?: string
+  VAPID_SUBJECT?: string   // 예: mailto:you@example.com
 }
 
 const app = new Hono<{ Bindings: Bindings }>()
+
+// ─── 환경변수 주입 미들웨어 ────────────────────────────────────────────────
+// Netlify Functions(Node)에서는 시크릿이 process.env로 들어온다.
+// 기존 라우트 코드가 c.env.X 형태를 그대로 쓰도록, 값이 비어있으면 process.env로 보충.
+// (Cloudflare 등 c.env가 이미 채워진 환경에서는 기존 값이 우선 유지된다.)
+app.use('*', async (c, next) => {
+  const penv: any = (typeof process !== 'undefined' && process.env) ? process.env : {}
+  const keys: (keyof Bindings)[] = [
+    'NOTION_API_KEY', 'GEMINI_API_KEY', 'GROQ_API_KEY',
+    'GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'APP_BASE_URL',
+    'VAPID_PUBLIC_KEY', 'VAPID_PRIVATE_KEY', 'VAPID_SUBJECT',
+  ]
+  for (const k of keys) {
+    if (!(c.env as any)[k] && penv[k]) (c.env as any)[k] = penv[k]
+  }
+  await next()
+})
 
 // ─── Rate Limiter (in-memory, per Worker instance) ────────────────────────────
 // Cloudflare Workers는 인스턴스별 메모리 — 분산 rate limit는 D1/KV 필요
@@ -42,7 +64,8 @@ function getGensparkUser(request: Request) {
 }
 
 app.use('*', cors())
-app.use('/static/*', serveStatic({ root: './' }))
+// 정적 자산(/static/*, /, manifest 등)은 Netlify CDN이 직접 서빙한다.
+// 이 Hono 앱은 /api/* 만 처리한다.
 
 // ─── Rate Limit Middleware: AI/STT 엔드포인트 보호 ────────────────────────────
 // Gemini: 분당 5회, 일 100회 제한 (무료 한도 훨씬 이내)
@@ -133,11 +156,16 @@ async function geminiRequest(apiKey: string, prompt: string): Promise<string> {
 
 // ─── Groq STT Helper ─────────────────────────────────────────────────────────
 async function groqSTT(apiKey: string, audioBase64: string, mimeType: string, language = 'ko') {
+  if (!apiKey) throw new Error('GROQ_API_KEY가 설정되지 않았습니다')
   // Groq Whisper API
   const binaryStr = atob(audioBase64)
   const bytes = new Uint8Array(binaryStr.length)
   for (let i = 0; i < binaryStr.length; i++) {
     bytes[i] = binaryStr.charCodeAt(i)
+  }
+  if (bytes.length < 1024) {
+    // 사실상 빈/무음 녹음 (Groq가 거부하거나 빈 결과 반환)
+    throw new Error('녹음이 너무 짧거나 비어 있어요 (마이크 입력을 확인해주세요)')
   }
   const ext = mimeType.includes('ogg') ? 'ogg' : mimeType.includes('mp4') ? 'mp4' : 'webm'
   const blob = new Blob([bytes], { type: mimeType })
@@ -145,13 +173,19 @@ async function groqSTT(apiKey: string, audioBase64: string, mimeType: string, la
   formData.append('file', blob, `audio.${ext}`)
   formData.append('model', 'whisper-large-v3')
   formData.append('language', language)
+  formData.append('response_format', 'json')
 
   const res = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
     method: 'POST',
     headers: { 'Authorization': `Bearer ${apiKey}` },
     body: formData,
   })
-  const data: any = await res.json()
+  const data: any = await res.json().catch(() => ({}))
+  if (!res.ok || data.error) {
+    const msg = data?.error?.message || `Groq STT 오류 (HTTP ${res.status})`
+    console.error('[Groq STT]', msg)
+    throw new Error(msg)
+  }
   return data.text || ''
 }
 
@@ -1044,20 +1078,147 @@ app.post('/api/ai/structure', async (c) => {
 // DB IDs는 클라이언트 localStorage에 저장하는 방식 사용
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// WEB PUSH (VAPID) — 알림 구독 저장 + 발송
+// 구독 정보는 Notion 의 "🔔 Push Subscriptions" DB에 저장 (스택 유지: DB만 사용)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const PUSH_DB_TITLE = '🔔 Push Subscriptions'
+
+// 부모 페이지 아래에 Push 구독 DB가 있으면 id 반환, 없으면 생성
+async function ensurePushDb(apiKey: string, parentPageId: string): Promise<string | null> {
+  if (!parentPageId) return null
+  const children = await notionRequest(apiKey, `/blocks/${parentPageId}/children?page_size=100`)
+  if (children.results) {
+    for (const block of children.results) {
+      if (block.type === 'child_database' && (block.child_database?.title || '') === PUSH_DB_TITLE) {
+        return block.id.replace(/-/g, '')
+      }
+    }
+  }
+  const created = await notionRequest(apiKey, '/databases', 'POST', {
+    parent: { type: 'page_id', page_id: parentPageId },
+    icon: { type: 'emoji', emoji: '🔔' },
+    title: [{ type: 'text', text: { content: PUSH_DB_TITLE } }],
+    properties: {
+      'endpoint': { title: {} },            // 구독 endpoint (고유키)
+      '구독정보': { rich_text: {} },          // PushSubscription JSON 전체
+      '스케줄 DB': { rich_text: {} },         // 이 사용자의 일정 DB id
+      '사용기기': { rich_text: {} },          // userAgent
+      '활성': { checkbox: {} },
+      '생성일': { created_time: {} },
+    },
+  })
+  return created.id ? created.id.replace(/-/g, '') : null
+}
+
+// endpoint 로 기존 구독 페이지 검색
+async function findPushPage(apiKey: string, pushDbId: string, endpoint: string) {
+  const res = await notionRequest(apiKey, `/databases/${pushDbId}/query`, 'POST', {
+    filter: { property: 'endpoint', title: { equals: endpoint.slice(0, 2000) } },
+    page_size: 1,
+  })
+  return res.results?.[0] || null
+}
+
+// 구독 등록 (upsert)
+app.post('/api/push/subscribe', async (c) => {
+  const apiKey = c.env.NOTION_API_KEY
+  const { parentPageId, subscription, scheduleDbId, userAgent } = await c.req.json()
+  if (!subscription?.endpoint) return c.json({ error: 'subscription required' }, 400)
+
+  const pushDbId = await ensurePushDb(apiKey, parentPageId)
+  if (!pushDbId) return c.json({ error: 'parentPageId required (push DB 생성 실패)' }, 400)
+
+  const endpoint = subscription.endpoint
+  const props: any = {
+    'endpoint': { title: [{ text: { content: endpoint.slice(0, 2000) } }] },
+    '구독정보': { rich_text: [{ text: { content: JSON.stringify(subscription).slice(0, 2000) } }] },
+    '스케줄 DB': { rich_text: [{ text: { content: scheduleDbId || '' } }] },
+    '사용기기': { rich_text: [{ text: { content: (userAgent || '').slice(0, 200) } }] },
+    '활성': { checkbox: true },
+  }
+
+  const existing = await findPushPage(apiKey, pushDbId, endpoint)
+  if (existing) {
+    await notionRequest(apiKey, `/pages/${existing.id}`, 'PATCH', { properties: props })
+  } else {
+    await notionRequest(apiKey, '/pages', 'POST', { parent: { database_id: pushDbId }, properties: props })
+  }
+  return c.json({ success: true, pushDbId })
+})
+
+// 구독 해제
+app.post('/api/push/unsubscribe', async (c) => {
+  const apiKey = c.env.NOTION_API_KEY
+  const { pushDbId, endpoint } = await c.req.json()
+  if (!pushDbId || !endpoint) return c.json({ error: 'pushDbId, endpoint required' }, 400)
+  const existing = await findPushPage(apiKey, pushDbId, endpoint)
+  if (existing) {
+    await notionRequest(apiKey, `/pages/${existing.id}`, 'PATCH', { properties: { '활성': { checkbox: false } } })
+  }
+  return c.json({ success: true })
+})
+
+// VAPID 공개키 제공 (프론트 구독 시 필요)
+app.get('/api/push/vapid-public', (c) => {
+  const key = c.env.VAPID_PUBLIC_KEY
+  if (!key) return c.json({ error: 'VAPID not configured' }, 500)
+  return c.json({ publicKey: key })
+})
+
+// 테스트 발송 (구독 직후 동작 확인용)
+app.post('/api/push/test', async (c) => {
+  const { subscription } = await c.req.json()
+  if (!subscription?.endpoint) return c.json({ error: 'subscription required' }, 400)
+  const pub = c.env.VAPID_PUBLIC_KEY, priv = c.env.VAPID_PRIVATE_KEY
+  const subj = c.env.VAPID_SUBJECT || 'mailto:admin@memonest.app'
+  if (!pub || !priv) return c.json({ error: 'VAPID not configured' }, 500)
+  try {
+    const webpush = (await import('web-push')).default
+    webpush.setVapidDetails(subj, pub, priv)
+    await webpush.sendNotification(subscription, JSON.stringify({
+      title: '🔔 MemoNest 알림 테스트',
+      body: '알림이 정상적으로 도착했어요!',
+      url: '/',
+    }))
+    return c.json({ success: true })
+  } catch (e: any) {
+    return c.json({ error: e?.message || 'push failed' }, 500)
+  }
+})
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // GOOGLE CALENDAR OAUTH 2.0
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const GOOGLE_SCOPES = 'https://www.googleapis.com/auth/calendar.events'
-const REDIRECT_URI_PROD = 'https://16bf51cf-4855-4db9-a334-aa07e29f4b47.vip.gensparksite.com/api/calendar/callback'
+
+// ─── Redirect URI 동적 산출 ───────────────────────────────────────────────────
+// 하드코딩된 배포 도메인 대신 실제 요청 Origin 기반으로 생성한다.
+// 우선순위: APP_BASE_URL 환경변수 > 요청 헤더(Origin/host) 로 계산.
+// 반드시 Google Cloud Console "승인된 리디렉션 URI"에 동일 값이 등록돼 있어야 한다.
+function getRedirectUri(c: any): string {
+  const explicit = (c.env?.APP_BASE_URL || '').replace(/\/+$/, '')
+  if (explicit) return `${explicit}/api/calendar/callback`
+
+  // Origin 헤더 우선, 없으면 forwarded proto/host 로 조립
+  const origin = c.req.header('Origin')
+  if (origin) return `${origin.replace(/\/+$/, '')}/api/calendar/callback`
+
+  const proto = c.req.header('X-Forwarded-Proto') || 'https'
+  const host = c.req.header('X-Forwarded-Host') || c.req.header('Host') || ''
+  return `${proto}://${host}/api/calendar/callback`
+}
 
 // ─── Google OAuth: 인증 URL 생성 ──────────────────────────────────────────────
 app.get('/api/calendar/auth-url', (c) => {
   const clientId = c.env.GOOGLE_CLIENT_ID
   if (!clientId) return c.json({ error: 'GOOGLE_CLIENT_ID not configured' }, 500)
 
+  const redirectUri = getRedirectUri(c)
   const params = new URLSearchParams({
     client_id: clientId,
-    redirect_uri: REDIRECT_URI_PROD,
+    redirect_uri: redirectUri,
     response_type: 'code',
     scope: GOOGLE_SCOPES,
     access_type: 'offline',    // refresh_token 발급
@@ -1065,7 +1226,7 @@ app.get('/api/calendar/auth-url', (c) => {
     state: 'memonest_cal',
   })
   const url = `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`
-  return c.json({ url })
+  return c.json({ url, redirectUri })
 })
 
 // ─── Google OAuth: 콜백 처리 + token 저장 (localStorage로 전달) ───────────────
@@ -1082,6 +1243,7 @@ app.get('/api/calendar/callback', async (c) => {
 
   const clientId = c.env.GOOGLE_CLIENT_ID
   const clientSecret = c.env.GOOGLE_CLIENT_SECRET
+  const redirectUri = getRedirectUri(c)
 
   // code → tokens 교환
   const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
@@ -1091,7 +1253,7 @@ app.get('/api/calendar/callback', async (c) => {
       code,
       client_id: clientId,
       client_secret: clientSecret,
-      redirect_uri: REDIRECT_URI_PROD,
+      redirect_uri: redirectUri,
       grant_type: 'authorization_code',
     }).toString(),
   })
@@ -1225,50 +1387,9 @@ app.post('/api/calendar/bulk', async (c) => {
   return c.json({ success: true, total: events.length, created: successCount, failed: events.length - successCount, results, newTokens })
 })
 
-// ─── Main App HTML ─────────────────────────────────────────────────────────────
-app.get('*', (c) => {
-  return c.html(`<!DOCTYPE html>
-<html lang="ko">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
-  <title>MemoNest 🪺</title>
-  <meta name="theme-color" content="#6366f1">
-  <meta name="apple-mobile-web-app-capable" content="yes">
-  <link rel="manifest" href="/static/manifest.json">
-  <script src="https://cdn.tailwindcss.com"></script>
-  <link href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.4.0/css/all.min.css" rel="stylesheet">
-  <link href="/static/style.css" rel="stylesheet">
-</head>
-<body class="bg-gray-50 min-h-screen">
-  <div id="app"></div>
-  <script src="/static/app.js"></script>
-  <script>
-    // PWA Service Worker 등록
-    if ('serviceWorker' in navigator) {
-      window.addEventListener('load', () => {
-        navigator.serviceWorker.register('/static/sw.js', { scope: '/' })
-          .then(reg => {
-            // 새 버전 감지 시 사용자에게 알림
-            reg.onupdatefound = () => {
-              const newSW = reg.installing;
-              if (newSW) {
-                newSW.onstatechange = () => {
-                  if (newSW.state === 'installed' && navigator.serviceWorker.controller) {
-                    if (window.MemoNest?.toast) {
-                      MemoNest.toast('🔄 새 버전이 있어요! 새로고침하면 적용돼요.', 'info', 5000);
-                    }
-                  }
-                };
-              }
-            };
-          })
-          .catch(() => {}); // 등록 실패는 조용히 무시 (선택적 기능)
-      });
-    }
-  </script>
-</body>
-</html>`)
-})
+// ─── API 미매칭 폴백 ───────────────────────────────────────────────────────────
+// 앱 HTML 셸(index.html)과 정적 자산은 Netlify CDN이 서빙한다.
+// 이 함수로는 /api/* 만 유입되므로(netlify.toml redirect), 매칭 안 되면 404 JSON.
+app.all('/api/*', (c) => c.json({ error: 'Not found', path: c.req.path }, 404))
 
 export default app

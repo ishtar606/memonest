@@ -1,0 +1,25 @@
+# Netlify 배포 설정 — MemoNest
+# 정적 자산은 public/ 를 CDN 이 직접 서빙하고, /api/* 는 Hono Node Function 이 처리한다.
+
+[build]
+  # 정적 파일 디렉터리 (index.html, static/app.js, static/style.css 등)
+  publish = "public"
+  # Netlify Functions 디렉터리 (TypeScript esbuild 자동 번들)
+  functions = "netlify/functions"
+  # 별도 프론트 빌드 스텝은 없음 (Vanilla JS SPA). 의존성만 설치.
+  command = "npm install"
+
+[functions]
+  # esbuild 로 TS 번들 (Node 런타임)
+  node_bundler = "esbuild"
+
+# /api/* 라우팅은 netlify/functions/api.ts 의 `export const config = { path: ['/api/*'] }`
+# 가 담당한다. 이 방식은 원본 경로(/api/schedules)를 그대로 보존하므로 Hono 라우터가 매칭된다.
+# (redirect 로 /.netlify/functions/api/:splat 로 넘기면 /api 프리픽스가 사라져 매칭 실패하므로 사용하지 않는다.)
+
+# 정적 파일이 없는 나머지 경로는 SPA 셸(index.html)로 (클라이언트 라우팅).
+# 함수 경로(/api/*)는 위 config.path 가 먼저 가로채므로 이 규칙의 영향을 받지 않는다.
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
