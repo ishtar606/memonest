@@ -112,47 +112,65 @@ async function notionRequest(apiKey: string, endpoint: string, method = 'GET', b
 }
 
 // ─── Gemini API Helper ────────────────────────────────────────────────────────
+// gemini-1.5-flash 는 deprecated(v1beta 404). 안정 버전을 우선 쓰고, 과부하(503)/쿼터(429)
+// 시에는 짧은 백오프 재시도 + 대체 모델로 폴백한다.
+const GEMINI_MODELS = ['gemini-2.5-flash', 'gemini-flash-latest', 'gemini-2.0-flash']
+
 async function geminiRequest(apiKey: string, prompt: string): Promise<string> {
   if (!apiKey) {
     console.error('[Gemini] API Key is missing')
     return ''
   }
-  try {
-    const controller = new AbortController()
-    const timeoutId = setTimeout(() => controller.abort(), 25000) // 25초 타임아웃
-    const res = await fetch(
-      // gemini-1.5-flash 는 v1beta에서 404(deprecated). 항상 최신 flash로 매핑되는 별칭 사용.
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=${apiKey}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: { temperature: 0.7, maxOutputTokens: 2048 }
-        }),
-        signal: controller.signal,
+  const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
+
+  for (let m = 0; m < GEMINI_MODELS.length; m++) {
+    const model = GEMINI_MODELS[m]
+    // 각 모델당 과부하 시 최대 2회까지 재시도
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const controller = new AbortController()
+        const timeoutId = setTimeout(() => controller.abort(), 20000)
+        const res = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: [{ parts: [{ text: prompt }] }],
+              generationConfig: { temperature: 0.7, maxOutputTokens: 2048 },
+            }),
+            signal: controller.signal,
+          }
+        )
+        clearTimeout(timeoutId)
+
+        if (res.status === 503 || res.status === 429) {
+          // 과부하/쿼터 → 백오프 후 재시도, 재시도 소진 시 다음 모델로
+          console.warn(`[Gemini] ${model} ${res.status} (attempt ${attempt + 1})`)
+          await sleep(600 * (attempt + 1))
+          continue
+        }
+        if (!res.ok) {
+          const errText = await res.text()
+          console.error(`[Gemini] ${model} HTTP ${res.status}: ${errText.slice(0, 200)}`)
+          break // 이 모델은 안 됨 → 다음 모델
+        }
+        const data: any = await res.json()
+        if (data.error) {
+          console.error('[Gemini] API error:', JSON.stringify(data.error).slice(0, 200))
+          break
+        }
+        const txt = data.candidates?.[0]?.content?.parts?.[0]?.text || ''
+        if (txt) return txt
+        break // 빈 응답이면 다음 모델 시도
+      } catch (e: any) {
+        if (e?.name === 'AbortError') console.error(`[Gemini] ${model} timeout`)
+        else console.error(`[Gemini] ${model} fetch error:`, e?.message)
+        await sleep(400)
       }
-    )
-    clearTimeout(timeoutId)
-    if (!res.ok) {
-      const errText = await res.text()
-      console.error(`[Gemini] HTTP ${res.status}: ${errText}`)
-      return ''
     }
-    const data: any = await res.json()
-    if (data.error) {
-      console.error('[Gemini] API error:', JSON.stringify(data.error))
-      return ''
-    }
-    return data.candidates?.[0]?.content?.parts?.[0]?.text || ''
-  } catch (e: any) {
-    if (e?.name === 'AbortError') {
-      console.error('[Gemini] Request timed out after 25s')
-    } else {
-      console.error('[Gemini] Fetch error:', e?.message)
-    }
-    return ''
   }
+  return ''
 }
 
 // ─── Groq STT Helper ─────────────────────────────────────────────────────────
@@ -1079,24 +1097,11 @@ app.post('/api/ai/structure', async (c) => {
 // 원인 파악 후 제거 예정. 키 값 자체는 반환하지 않는다.
 app.get('/api/ai/debug', async (c) => {
   const key = c.env.GEMINI_API_KEY || ''
-  const info: any = { hasKey: !!key, keyLen: key.length, model: 'gemini-flash-latest' }
+  const info: any = { hasKey: !!key, keyLen: key.length }
   if (!key) return c.json({ ...info, note: 'GEMINI_API_KEY 미주입' })
-  try {
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=${key}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ contents: [{ parts: [{ text: 'ping. reply with the single word: pong' }] }] }),
-      }
-    )
-    const text = await res.text()
-    info.httpStatus = res.status
-    info.bodyPreview = text.slice(0, 400) // 에러 메시지/응답 앞부분만
-    return c.json(info)
-  } catch (e: any) {
-    return c.json({ ...info, fetchError: e?.message })
-  }
+  // 실제 헬퍼 경로(재시도+폴백)로 테스트
+  const out = await geminiRequest(key, 'ping. reply with the single word: pong')
+  return c.json({ ...info, result: out, ok: !!out })
 })
 
 // ─── Settings API (DB IDs 저장/조회) ─────────────────────────────────────────
