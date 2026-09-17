@@ -1075,6 +1075,30 @@ app.post('/api/ai/structure', async (c) => {
   return c.json(parsed)
 })
 
+// ─── (임시) Gemini 진단 라우트 — 키 노출 없이 상태만 보고 ────────────────────
+// 원인 파악 후 제거 예정. 키 값 자체는 반환하지 않는다.
+app.get('/api/ai/debug', async (c) => {
+  const key = c.env.GEMINI_API_KEY || ''
+  const info: any = { hasKey: !!key, keyLen: key.length, model: 'gemini-flash-latest' }
+  if (!key) return c.json({ ...info, note: 'GEMINI_API_KEY 미주입' })
+  try {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=${key}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contents: [{ parts: [{ text: 'ping. reply with the single word: pong' }] }] }),
+      }
+    )
+    const text = await res.text()
+    info.httpStatus = res.status
+    info.bodyPreview = text.slice(0, 400) // 에러 메시지/응답 앞부분만
+    return c.json(info)
+  } catch (e: any) {
+    return c.json({ ...info, fetchError: e?.message })
+  }
+})
+
 // ─── Settings API (DB IDs 저장/조회) ─────────────────────────────────────────
 // DB IDs는 클라이언트 localStorage에 저장하는 방식 사용
 
