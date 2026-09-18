@@ -53,14 +53,17 @@ export default async (req: Request) => {
       pageId: p.id,
       sub,
       scheduleDbId: p.properties?.['스케줄 DB']?.rich_text?.[0]?.text?.content || '',
+      todoDbId: p.properties?.['할일 DB']?.rich_text?.[0]?.text?.content || '',
+      morningSummary: p.properties?.['아침요약']?.checkbox !== false,
     }
-  }).filter((s: any) => s.sub && s.scheduleDbId)
+  }).filter((s: any) => s.sub)
 
   if (!subs.length) return new Response('no active subscriptions')
 
-  // 2) 스케줄 DB 별로 일정 조회 (중복 조회 방지 위해 캐시)
+  // 2) DB별 조회 캐시 (중복 조회 방지)
   const schedCache: Record<string, any[]> = {}
   async function loadSchedules(dbId: string) {
+    if (!dbId) return []
     if (schedCache[dbId]) return schedCache[dbId]
     const res = await notion(`/databases/${dbId}/query`, 'POST', {
       sorts: [{ property: '날짜/시간', direction: 'ascending' }],
@@ -68,6 +71,14 @@ export default async (req: Request) => {
     })
     schedCache[dbId] = res.results || []
     return schedCache[dbId]
+  }
+  const todoCache: Record<string, any[]> = {}
+  async function loadTodos(dbId: string) {
+    if (!dbId) return []
+    if (todoCache[dbId]) return todoCache[dbId]
+    const res = await notion(`/databases/${dbId}/query`, 'POST', { page_size: 100 })
+    todoCache[dbId] = res.results || []
+    return todoCache[dbId]
   }
 
   let sent = 0, failed = 0
@@ -135,6 +146,64 @@ export default async (req: Request) => {
             failed++
             if (e?.statusCode === 404 || e?.statusCode === 410) staleEndpoints.push(s.pageId)
           }
+        }
+      }
+    }
+
+    // 2-b) ToDo 마감 알림 — 오늘 마감(미완료)인 할 일을 "그날 오전 9시"에 한 번 알림
+    // (일정처럼 정확한 시각이 없으므로, 오늘 09:00(로컬 근사=UTC 0시 창)에 발송)
+    if (s.todoDbId) {
+      try {
+        const todos = await loadTodos(s.todoDbId)
+        const todayStr = new Date(now).toISOString().split('T')[0]
+        // 오전 9시(KST 기준 대략) 발송 창: 매 실행이 5분 단위이므로 00:00Z(=09:00 KST) 창에만
+        const nowD = new Date(now)
+        const isMorningWindow = nowD.getUTCHours() === 0 && nowD.getUTCMinutes() < 5 // 09:00 KST 근처
+        if (isMorningWindow) {
+          const dueToday = todos.filter((t: any) => {
+            if (t.properties?.['상태']?.select?.name === '완료') return false
+            const d = t.properties?.['Due Date']?.date?.start || ''
+            return d && d.slice(0, 10) <= todayStr
+          })
+          if (dueToday.length) {
+            const names = dueToday.slice(0, 3).map((t: any) => t.properties?.['할 일']?.title?.[0]?.text?.content || '').filter(Boolean)
+            const more = dueToday.length > 3 ? ` 외 ${dueToday.length - 3}건` : ''
+            try {
+              await webpush.sendNotification(s.sub, JSON.stringify({
+                title: `📋 오늘까지 할 일 ${dueToday.length}건`,
+                body: `${names.join(', ')}${more}`,
+                url: '/', tag: `todo-due-${todayStr}`,
+              }))
+              sent++
+            } catch (e: any) {
+              failed++
+              if (e?.statusCode === 404 || e?.statusCode === 410) staleEndpoints.push(s.pageId)
+            }
+          }
+        }
+      } catch (_) {}
+    }
+
+    // 2-c) 매일 아침 오늘 요약 — 09:00 KST 창에 오늘 일정 개수 + 할 일 요약
+    if (s.morningSummary) {
+      const nowD = new Date(now)
+      const isMorningWindow = nowD.getUTCHours() === 0 && nowD.getUTCMinutes() < 5
+      if (isMorningWindow) {
+        try {
+          const todayStr = new Date(now).toISOString().split('T')[0]
+          const schedules = await loadSchedules(s.scheduleDbId)
+          const todaySched = schedules.filter((sc: any) => (sc.properties?.['날짜/시간']?.date?.start || '').slice(0,10) === todayStr)
+          const todos = s.todoDbId ? await loadTodos(s.todoDbId) : []
+          const undone = todos.filter((t: any) => t.properties?.['상태']?.select?.name !== '완료').length
+          await webpush.sendNotification(s.sub, JSON.stringify({
+            title: `☀️ 오늘 요약`,
+            body: `일정 ${todaySched.length}건 · 미완료 할 일 ${undone}건`,
+            url: '/', tag: `morning-${todayStr}`,
+          }))
+          sent++
+        } catch (e: any) {
+          failed++
+          if (e?.statusCode === 404 || e?.statusCode === 410) staleEndpoints.push(s.pageId)
         }
       }
     }

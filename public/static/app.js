@@ -3790,6 +3790,7 @@ const MemoNest = {
           parentPageId: this.load('parentPageId', ''),
           subscription: sub.toJSON(),
           scheduleDbId: this.state.dbIds.schedule || '',
+          todoDbId: this.state.dbIds.todo || '',
           userAgent: navigator.userAgent,
         }),
       });

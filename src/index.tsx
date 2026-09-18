@@ -1311,12 +1311,28 @@ async function ensurePushDb(apiKey: string, parentPageId: string): Promise<strin
       'endpoint': { title: {} },            // 구독 endpoint (고유키)
       '구독정보': { rich_text: {} },          // PushSubscription JSON 전체
       '스케줄 DB': { rich_text: {} },         // 이 사용자의 일정 DB id
+      '할일 DB': { rich_text: {} },           // 이 사용자의 ToDo DB id (마감 알림용)
       '사용기기': { rich_text: {} },          // userAgent
       '활성': { checkbox: {} },
+      '아침요약': { checkbox: {} },           // 매일 아침 오늘 요약 알림 on/off
       '생성일': { created_time: {} },
     },
   })
   return created.id ? created.id.replace(/-/g, '') : null
+}
+
+// 기존 push DB에 신규 프로퍼티('할일 DB','아침요약')가 없으면 추가 (구버전 호환)
+async function ensurePushDbProps(apiKey: string, pushDbId: string) {
+  try {
+    const db = await notionRequest(apiKey, `/databases/${pushDbId}`)
+    const props = db?.properties || {}
+    const toAdd: any = {}
+    if (!props['할일 DB']) toAdd['할일 DB'] = { rich_text: {} }
+    if (!props['아침요약']) toAdd['아침요약'] = { checkbox: {} }
+    if (Object.keys(toAdd).length) {
+      await notionRequest(apiKey, `/databases/${pushDbId}`, 'PATCH', { properties: toAdd })
+    }
+  } catch (_) { /* 실패해도 저장은 시도 */ }
 }
 
 // endpoint 로 기존 구독 페이지 검색
@@ -1331,7 +1347,7 @@ async function findPushPage(apiKey: string, pushDbId: string, endpoint: string) 
 // 구독 등록 (upsert)
 app.post('/api/push/subscribe', async (c) => {
   const apiKey = c.env.NOTION_API_KEY
-  const { parentPageId, subscription, scheduleDbId, userAgent } = await c.req.json()
+  const { parentPageId, subscription, scheduleDbId, todoDbId, morningSummary, userAgent } = await c.req.json()
   if (!subscription?.endpoint) return c.json({ error: 'subscription required' }, 400)
 
   // parentPageId 가 없으면(과거에 setup한 경우 등) scheduleDbId 의 부모 페이지에서 역추적
@@ -1350,14 +1366,17 @@ app.post('/api/push/subscribe', async (c) => {
 
   const pushDbId = await ensurePushDb(apiKey, rootPageId)
   if (!pushDbId) return c.json({ error: 'push 구독 DB 생성 실패 (노션 페이지 연결 확인)' }, 400)
+  await ensurePushDbProps(apiKey, pushDbId) // 구버전 DB에 신규 프로퍼티 보강
 
   const endpoint = subscription.endpoint
   const props: any = {
     'endpoint': { title: [{ text: { content: endpoint.slice(0, 2000) } }] },
     '구독정보': { rich_text: [{ text: { content: JSON.stringify(subscription).slice(0, 2000) } }] },
     '스케줄 DB': { rich_text: [{ text: { content: scheduleDbId || '' } }] },
+    '할일 DB': { rich_text: [{ text: { content: todoDbId || '' } }] },
     '사용기기': { rich_text: [{ text: { content: (userAgent || '').slice(0, 200) } }] },
     '활성': { checkbox: true },
+    '아침요약': { checkbox: morningSummary !== false }, // 기본 on
   }
 
   const existing = await findPushPage(apiKey, pushDbId, endpoint)
