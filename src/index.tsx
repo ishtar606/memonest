@@ -1215,8 +1215,22 @@ app.post('/api/push/subscribe', async (c) => {
   const { parentPageId, subscription, scheduleDbId, userAgent } = await c.req.json()
   if (!subscription?.endpoint) return c.json({ error: 'subscription required' }, 400)
 
-  const pushDbId = await ensurePushDb(apiKey, parentPageId)
-  if (!pushDbId) return c.json({ error: 'parentPageId required (push DB 생성 실패)' }, 400)
+  // parentPageId 가 없으면(과거에 setup한 경우 등) scheduleDbId 의 부모 페이지에서 역추적
+  let rootPageId = parentPageId
+  if (!rootPageId && scheduleDbId) {
+    try {
+      const db = await notionRequest(apiKey, `/databases/${scheduleDbId}`)
+      if (db?.parent?.type === 'page_id' && db.parent.page_id) {
+        rootPageId = db.parent.page_id.replace(/-/g, '')
+      }
+    } catch (_) { /* 무시하고 아래에서 에러 처리 */ }
+  }
+  if (!rootPageId) {
+    return c.json({ error: '루트 페이지를 찾을 수 없어요. 설정 화면에서 노션 페이지를 다시 연결해주세요.' }, 400)
+  }
+
+  const pushDbId = await ensurePushDb(apiKey, rootPageId)
+  if (!pushDbId) return c.json({ error: 'push 구독 DB 생성 실패 (노션 페이지 연결 확인)' }, 400)
 
   const endpoint = subscription.endpoint
   const props: any = {
@@ -1233,7 +1247,7 @@ app.post('/api/push/subscribe', async (c) => {
   } else {
     await notionRequest(apiKey, '/pages', 'POST', { parent: { database_id: pushDbId }, properties: props })
   }
-  return c.json({ success: true, pushDbId })
+  return c.json({ success: true, pushDbId, parentPageId: rootPageId })
 })
 
 // 구독 해제

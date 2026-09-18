@@ -3556,6 +3556,8 @@ const MemoNest = {
       this.state.pushDbId = data.pushDbId || null;
       this.save('pushEnabled', true);
       this.save('pushDbId', this.state.pushDbId);
+      // 서버가 역추적한 루트 페이지를 저장해두면 다음부터 빠름
+      if (data.parentPageId) this.save('parentPageId', data.parentPageId);
 
       this.toast('🔔 알림을 켰어요! 테스트 알림을 보냈어요.', 'success', 4000);
       // 테스트 발송
