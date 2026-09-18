@@ -9,3 +9,4 @@
 - **feat:** 웹푸시 알림(Android/데스크톱/iOS 공통) — VAPID 기반 구독(/api/push/*), Notion에 구독 DB 저장, sw.js push/notificationclick 핸들러, iOS는 홈화면 추가 안내, Netlify Scheduled Function(reminders.ts, 5분 주기)으로 임박 일정 리마인더 발송
 - **fix:** STT(음성인식) 실패 시 원인 불명 문제 — groqSTT가 Groq 오류/빈 녹음/키 미설정을 삼키지 않고 실제 메시지를 throw, 프론트가 서버 error 메시지를 토스트로 표시
 - **fix:** AI 요약이 항상 빈 결과({})로 반환되던 문제 — deprecated된 gemini-1.5-flash(v1beta 404) 교체 + 과부하(503)/쿼터(429) 대응: gemini-2.5-flash 우선, 백오프 재시도 후 gemini-flash-latest/2.0-flash로 폴백
+- **fix:** 회의록 AI 요약 프롬프트 개선(원문 충실·창작 금지·정보 부족 시 빈값) + 노션 저장 구조 개편(긴 요약/논의/액션/원본을 토글 블록으로 접기, DB 속성은 미리보기만)

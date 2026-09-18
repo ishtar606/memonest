@@ -745,21 +745,32 @@ app.post('/api/meetings', async (c) => {
   let parsed: any = {}
   try {
     const structured = await geminiRequest(geminiKey,
-      `다음 회의 내용을 전문적인 회의록으로 구조화해줘.
-날짜: ${date}
-고객사/프로젝트: ${client || '미지정'}
+      `너는 회의록 정리 도우미다. 아래 "입력 내용"만을 근거로 회의록을 정리한다.
 
-내용:
+[매우 중요한 규칙]
+- 입력에 실제로 있는 정보만 사용한다. 없는 내용을 지어내지 마라(창작 금지).
+- 과도한 의역·미사여구를 피하고, 원문의 표현과 사실을 최대한 보존한다.
+- 요약은 핵심을 추리되 원문에 근거해야 한다. 원문에 없는 결론/배경을 만들지 마라.
+- 해당 항목의 정보가 입력에 없으면, 그 필드는 빈 문자열("") 또는 빈 배열([])로 둔다. "내용 없음" 같은 문장을 만들어 채우지 마라.
+- 입력이 회의 내용이 아니거나(예: 기사·잡담) 정보가 빈약하면, 억지로 회의록처럼 꾸미지 말고 있는 그대로 요약하고 나머지는 비워라.
+- action_items 는 입력에 명시적으로 나타난 "해야 할 일/결정된 다음 행동"만 담는다. 없으면 빈 배열.
+
+날짜: ${date || '(미지정)'}
+고객사/프로젝트: ${client || '(미지정)'}
+
+입력 내용:
+"""
 ${combined}
+"""
 
-반환 형식 (JSON만):
+아래 JSON 형식으로만 답하라(다른 텍스트 없이):
 {
-  "title": "회의 제목",
-  "summary": "회의 요약 (3-5문장)",
-  "agenda": ["안건1", "안건2"],
-  "discussion": "주요 논의 내용",
-  "action_items": ["액션아이템1", "액션아이템2"],
-  "tags": ["태그1", "태그2"]
+  "title": "입력을 대표하는 짧은 제목(20자 이내). 정보 부족하면 날짜 기반 제목",
+  "summary": "입력에 근거한 요약. 원문 사실 보존, 창작 금지. 정보 없으면 빈 문자열",
+  "agenda": ["입력에 나온 안건/주제만. 없으면 빈 배열"],
+  "discussion": "주요 논의/내용을 원문 근거로 정리. 없으면 빈 문자열",
+  "action_items": ["입력에 명시된 할 일/결정만. 없으면 빈 배열"],
+  "tags": ["내용 기반 핵심 키워드 태그(최대 5개)"]
 }`
     )
     const jsonMatch = structured.match(/\{[\s\S]*\}/)
@@ -767,46 +778,97 @@ ${combined}
   } catch (e) {
     // AI 실패해도 기본값으로 진행
   }
-  // AI 결과가 없으면 기본값
+  // AI 결과가 없으면(=AI 실패) 원문을 그대로 보존 (창작하지 않음)
   if (!parsed.title) {
     parsed = {
       title: client ? `${client} 회의 ${date || ''}`.trim() : `회의록 ${date || new Date().toISOString().split('T')[0]}`,
-      summary: combined.slice(0, 200),
+      summary: '',            // AI 실패 시 요약을 지어내지 않음 (원문은 본문에 보존)
       agenda: [],
-      discussion: combined,
+      discussion: '',
       action_items: [],
-      tags: []
+      tags: [],
+      _aiFailed: true,
     }
   }
+
+  // ── Notion 블록 헬퍼 ──────────────────────────────────────────────────────
+  // 긴 텍스트는 2000자 단위로 나눠 여러 rich_text 블록/문단으로 (Notion 2000자 제한)
+  const chunk = (s: string, n = 1900) => {
+    const out: string[] = []
+    for (let i = 0; i < s.length; i += n) out.push(s.slice(i, i + n))
+    return out.length ? out : ['']
+  }
+  const paragraphs = (text: string) => chunk(text || '').map(t => ({
+    object: 'block', type: 'paragraph',
+    paragraph: { rich_text: [{ type: 'text', text: { content: t } }] },
+  }))
+  // 토글 블록: 제목을 클릭하면 안쪽 내용이 펼쳐짐 (긴 글 접기용)
+  const toggle = (title: string, childrenBlocks: any[]) => ({
+    object: 'block', type: 'toggle',
+    toggle: {
+      rich_text: [{ type: 'text', text: { content: title } }],
+      children: childrenBlocks.length ? childrenBlocks : paragraphs('(내용 없음)'),
+    },
+  })
+
+  // DB 속성: 표에서 보기 좋게 "짧은 미리보기"만 넣는다 (전문은 페이지 본문 토글에).
+  const previewLine = (s: string, n = 120) => {
+    const oneLine = (s || '').replace(/\s+/g, ' ').trim()
+    return oneLine.length > n ? oneLine.slice(0, n) + '…' : oneLine
+  }
+  const actionCount = (parsed.action_items || []).length
 
   const properties: any = {
     '회의 제목': { title: [{ text: { content: parsed.title || `${client} 회의` } }] },
     '날짜': { date: { start: date || new Date().toISOString().split('T')[0] } },
     '고객사/프로젝트': { rich_text: [{ text: { content: client || '' } }] },
-    '요약': { rich_text: [{ text: { content: (parsed.summary || '').slice(0, 2000) } }] },
-    '액션 아이템': { rich_text: [{ text: { content: (parsed.action_items || []).join('\n').slice(0, 2000) } }] },
+    // 요약 속성 = 한 줄 미리보기 (표에서 잘려도 핵심만 보이게)
+    '요약': { rich_text: [{ text: { content: previewLine(parsed.summary) } }] },
+    // 액션 아이템 속성 = 개수 요약 (상세는 본문 토글에)
+    '액션 아이템': { rich_text: [{ text: { content: actionCount ? `액션 ${actionCount}건 (본문 참조)` : '' } }] },
   }
   if (parsed.tags?.length) properties['태그'] = { multi_select: parsed.tags.slice(0, 5).map((t: string) => ({ name: t.slice(0, 100) })) }
   if (scheduleId) properties['일정 ID'] = { rich_text: [{ text: { content: scheduleId } }] }
 
-  const children: any[] = [
-    { object: 'block', type: 'heading_2', heading_2: { rich_text: [{ text: { content: '📝 회의 요약' } }] } },
-    { object: 'block', type: 'paragraph', paragraph: { rich_text: [{ text: { content: parsed.summary || '' } }] } },
-    { object: 'block', type: 'heading_2', heading_2: { rich_text: [{ text: { content: '📌 안건' } }] } },
-    ...(parsed.agenda || []).map((item: string) => ({
-      object: 'block', type: 'bulleted_list_item',
-      bulleted_list_item: { rich_text: [{ text: { content: item } }] }
-    })),
-    { object: 'block', type: 'heading_2', heading_2: { rich_text: [{ text: { content: '💬 주요 논의' } }] } },
-    { object: 'block', type: 'paragraph', paragraph: { rich_text: [{ text: { content: parsed.discussion || '' } }] } },
-    { object: 'block', type: 'heading_2', heading_2: { rich_text: [{ text: { content: '✅ 액션 아이템' } }] } },
-    ...(parsed.action_items || []).map((item: string) => ({
+  // ── 페이지 본문: 토글 기반 (긴 글은 접었다 펼침) ──────────────────────────
+  const children: any[] = []
+
+  if (parsed._aiFailed) {
+    children.push({
+      object: 'block', type: 'callout',
+      callout: {
+        icon: { type: 'emoji', emoji: '⚠️' },
+        rich_text: [{ type: 'text', text: { content: 'AI 요약이 일시적으로 실패해 원문만 저장했어요. 잠시 후 다시 시도하면 요약이 생성됩니다.' } }],
+      },
+    })
+  }
+
+  // 요약 (토글, 기본 펼침 느낌으로 heading + 문단)
+  children.push({ object: 'block', type: 'heading_3', heading_3: { rich_text: [{ text: { content: '📝 회의 요약' } }] } })
+  children.push(...paragraphs(parsed.summary || '(요약 없음)'))
+
+  // 안건 (토글)
+  children.push(toggle('📌 안건 펼쳐보기', (parsed.agenda || []).map((item: string) => ({
+    object: 'block', type: 'bulleted_list_item',
+    bulleted_list_item: { rich_text: [{ text: { content: item } }] },
+  }))))
+
+  // 주요 논의 (토글 — 보통 길어서 접기)
+  children.push(toggle('💬 주요 논의 펼쳐보기', paragraphs(parsed.discussion || '')))
+
+  // 액션 아이템 (토글 안 체크박스)
+  children.push(toggle(`✅ 액션 아이템 펼쳐보기${actionCount ? ` (${actionCount})` : ''}`,
+    (parsed.action_items || []).map((item: string) => ({
       object: 'block', type: 'to_do',
-      to_do: { rich_text: [{ text: { content: item } }], checked: false }
-    })),
-    { object: 'block', type: 'heading_2', heading_2: { rich_text: [{ text: { content: '🎙️ 원본 녹취' } }] } },
-    { object: 'block', type: 'paragraph', paragraph: { rich_text: [{ text: { content: transcript || '' } }] } },
-  ]
+      to_do: { rich_text: [{ text: { content: item } }], checked: false },
+    }))
+  ))
+
+  // 원본 (수기 메모 + 녹취, 각각 토글로 접기)
+  if (manualNotes) {
+    children.push(toggle('🗒️ 수기 메모 원본', paragraphs(manualNotes)))
+  }
+  children.push(toggle('🎙️ 음성 녹취 원본', paragraphs(transcript || '')))
 
   const page = await notionRequest(apiKey, '/pages', 'POST', {
     parent: { database_id: dbId },
@@ -835,8 +897,16 @@ app.patch('/api/meetings/:pageId', async (c) => {
   if (body.title) properties['회의 제목'] = { title: [{ text: { content: body.title } }] }
   if (body.date) properties['날짜'] = { date: { start: body.date } }
   if (body.client !== undefined) properties['고객사/프로젝트'] = { rich_text: body.client ? [{ text: { content: body.client } }] : [] }
-  if (body.summary !== undefined) properties['요약'] = { rich_text: body.summary ? [{ text: { content: body.summary.slice(0, 2000) } }] : [] }
-  if (body.actions !== undefined) properties['액션 아이템'] = { rich_text: body.actions ? [{ text: { content: body.actions.slice(0, 2000) } }] : [] }
+  // 요약/액션 속성은 표 가독성을 위해 "미리보기"만 저장 (전문은 페이지 본문 토글에)
+  if (body.summary !== undefined) {
+    const oneLine = (body.summary || '').replace(/\s+/g, ' ').trim()
+    const preview = oneLine.length > 120 ? oneLine.slice(0, 120) + '…' : oneLine
+    properties['요약'] = { rich_text: preview ? [{ text: { content: preview } }] : [] }
+  }
+  if (body.actions !== undefined) {
+    const cnt = (body.actions || '').split('\n').map((s: string) => s.trim()).filter(Boolean).length
+    properties['액션 아이템'] = { rich_text: cnt ? [{ text: { content: `액션 ${cnt}건 (본문 참조)` } }] : [] }
+  }
   const data = await notionRequest(apiKey, `/pages/${pageId}`, 'PATCH', { properties })
   return c.json(data)
 })
