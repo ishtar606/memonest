@@ -3136,6 +3136,7 @@ const MemoNest = {
     ${this._renderTzBar()}
     ${this._renderPushBanner()}
     <div id="sched-todo-due"></div>
+    <div id="sched-filter-bar">${this._renderSchedFilterBar()}</div>
     ${this._renderGCalBanner()}
     <div id="schedule-split" style="display:${isPC?'grid':'block'};grid-template-columns:1fr 1fr;gap:16px;min-height:0;${isPC?'':''}">
       <!-- 왼쪽: 캘린더 -->
@@ -3517,6 +3518,12 @@ const MemoNest = {
       rangeLabel = anchor.toLocaleDateString('ko-KR',{year:'numeric',month:'long'});
     }
 
+    // 카테고리(업무/개인) 필터 적용
+    const grp = this._schedFilterGroups[this._schedCatFilter || 'all'];
+    if (grp && grp.cats) {
+      filtered = filtered.filter(([,s]) => grp.cats.includes(s.category || '기타'));
+    }
+
     // 날짜순 정렬
     filtered.sort(([,a],[,b]) => (a.datetime||'').localeCompare(b.datetime||''));
 
@@ -3792,6 +3799,35 @@ const MemoNest = {
     this.toast(`타임존을 ${this._fmtOffset(min)}(으)로 변경했어요`, 'info');
     // 표시 갱신 (선택 타임존 기준으로 리스트/캘린더 재렌더)
     this._renderCalendar();
+    this._renderScheduleList();
+  },
+
+  // 일정 카테고리 필터 (업무/개인 통합 뷰)
+  // group 매핑: 업무=회의, 개인=개인·약속, 이벤트=이벤트, 기타=기타
+  _schedCatFilter: 'all',
+  _schedFilterGroups: {
+    all:   { label: '전체', cats: null },
+    work:  { label: '💼 업무', cats: ['회의'] },
+    personal: { label: '🏠 개인', cats: ['개인','약속'] },
+    event: { label: '🎉 이벤트', cats: ['이벤트'] },
+    etc:   { label: '기타', cats: ['기타'] },
+  },
+  _renderSchedFilterBar() {
+    const cur = this._schedCatFilter || 'all';
+    return `
+    <div style="display:flex;gap:6px;overflow-x:auto;padding-bottom:6px;margin-bottom:8px">
+      ${Object.entries(this._schedFilterGroups).map(([k, g]) => `
+        <button onclick="MemoNest.setSchedCatFilter('${k}')"
+          style="white-space:nowrap;padding:5px 12px;border-radius:20px;border:1px solid ${cur===k?'var(--primary)':'var(--border)'};
+                 background:${cur===k?'var(--primary)':'#fff'};color:${cur===k?'#fff':'#64748b'};
+                 font-size:12px;font-weight:600;cursor:pointer">${g.label}</button>`).join('')}
+    </div>`;
+  },
+  setSchedCatFilter(k) {
+    this._schedCatFilter = k;
+    // 필터 바(활성 상태) + 리스트만 갱신
+    const bar = document.getElementById('sched-filter-bar');
+    if (bar) bar.innerHTML = this._renderSchedFilterBar();
     this._renderScheduleList();
   },
 
