@@ -381,7 +381,8 @@ const MemoNest = {
         <p>노션에서 MemoNest 루트 페이지 ID를 입력해주세요.<br>
         페이지 URL에서 마지막 32자리가 Page ID입니다.<br>
         <small style="color:#94a3b8">예: notion.so/abc123... → abc123... 부분</small></p>
-        <input class="form-input" id="setup-page-id" placeholder="노션 페이지 ID (32자리)" />
+        <input class="form-input" id="setup-page-id" placeholder="노션 페이지 ID (32자리)"
+          type="text" inputmode="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" />
       </div>
 
       <div class="setup-step">

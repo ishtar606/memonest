@@ -328,7 +328,8 @@ body {
   padding: 10px 14px;
   border: 1.5px solid var(--border);
   border-radius: 10px;
-  font-size: 14px;
+  /* 16px 이상: 모바일(안드로이드 Chrome)에서 입력 포커스 시 자동 확대/키보드 닫힘 방지 */
+  font-size: 16px;
   background: white;
   color: var(--text);
   transition: border-color 0.2s;
