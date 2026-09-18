@@ -2,6 +2,7 @@
 
 ## [2026-09-18] (모바일 수정)
 - **fix:** 안드로이드 Chrome에서 입력 시 키보드가 닫히던 문제 — viewport의 maximum-scale=1.0 제거 + form 입력 글꼴 16px로(포커스 자동 확대 방지)
+- **fix:** 노션 DB '생성' 시 Netlify 함수 타임아웃으로 'Failed to fetch' 나던 문제 — initNotion에 25초 타임아웃 + 실패 시 기존 DB '복원'으로 자동 대체
 
 ## [2026-09-18] (개선)
 - **perf:** 홈 대시보드 데이터 fetch 최적화 — todos/schedules를 각 1회만 호출해 위젯들이 공유(기존 5회 → 2회)

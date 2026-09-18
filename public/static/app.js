@@ -653,27 +653,59 @@ const MemoNest = {
     document.getElementById('setup-init-btn').disabled = true;
     document.getElementById('setup-progress-text').textContent = '노션에 DB를 생성하는 중... (약 30초 소요)';
 
+    // 완료 처리 공통
+    const finish = (databases) => {
+      this.state.dbIds = databases;
+      this.save('dbIds', databases);
+      this.save('parentPageId', cleanId); // 웹푸시 구독 DB 생성에 필요
+      this.state.isSetupDone = true;
+      this.toast('🎉 설정 완료! MemoNest를 시작합니다', 'success');
+      this.render();
+    };
+
     try {
-      const res = await fetch('/api/notion/init', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ parentPageId: cleanId })
-      });
-      const data = await res.json();
-      if (data.success) {
-        this.state.dbIds = data.databases;
-        this.save('dbIds', data.databases);
-        this.save('parentPageId', cleanId); // 웹푸시 구독 DB 생성에 필요
-        this.state.isSetupDone = true;
-        this.toast('🎉 설정 완료! MemoNest를 시작합니다', 'success');
-        this.render();
-      } else {
-        throw new Error(data.error || '생성 실패');
-      }
+      const data = await this._notionSetupRequest('/api/notion/init', cleanId);
+      if (data.success && data.databases) { finish(data.databases); return; }
+      throw new Error(data.error || '생성 실패');
     } catch (e) {
-      this.toast(`오류: ${e.message}`, 'error');
+      // 생성이 오래 걸려 타임아웃/실패한 경우: 기존 DB가 이미 있으면 복원으로 자동 대체
+      const isTimeout = /timeout|fetch|network/i.test(e.message || '');
+      document.getElementById('setup-progress-text').textContent = isTimeout
+        ? '생성이 지연돼 기존 DB 연결을 시도하는 중...'
+        : '기존 DB 연결을 시도하는 중...';
+      try {
+        const rec = await this._notionSetupRequest('/api/notion/recover', cleanId);
+        if (rec.success && rec.found === 7 && rec.databases) { finish(rec.databases); return; }
+        if (rec.success && rec.found > 0) {
+          this.toast(`⚠️ ${rec.found}/7개만 찾았어요. 잠시 후 "생성" 버튼을 다시 눌러 나머지를 만들어주세요.`, 'info', 6000);
+        } else {
+          throw new Error(e.message);
+        }
+      } catch (e2) {
+        this.toast(`오류: ${e2.message}. 잠시 후 다시 시도하거나 "기존 DB 복원"을 눌러주세요.`, 'error', 6000);
+      }
       document.getElementById('setup-init-btn').disabled = false;
       document.getElementById('setup-progress').style.display = 'none';
+    }
+  },
+
+  // 노션 설정 요청 (타임아웃 25초 + JSON 파싱)
+  async _notionSetupRequest(path, parentPageId) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 25000);
+    try {
+      const res = await fetch(path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ parentPageId }),
+        signal: controller.signal,
+      });
+      return await res.json();
+    } catch (e) {
+      if (e.name === 'AbortError') throw new Error('요청 시간이 초과됐어요 (timeout)');
+      throw new Error(e.message || 'network');
+    } finally {
+      clearTimeout(timer);
     }
   },
 
