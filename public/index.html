@@ -18,7 +18,7 @@
     // PWA Service Worker 등록
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', () => {
-        navigator.serviceWorker.register('/static/sw.js', { scope: '/' })
+        navigator.serviceWorker.register('/sw.js', { scope: '/' })
           .then(reg => {
             // 새 버전 감지 시 사용자에게 알림
             reg.onupdatefound = () => {

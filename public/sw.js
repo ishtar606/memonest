@@ -1,6 +1,6 @@
-// MemoNest Service Worker — v2.1.1
+// MemoNest Service Worker — 루트(/sw.js)에서 서빙되어 scope '/' 를 제어한다.
+// (기존 /static/sw.js 는 scope 제약으로 등록 실패 → 루트로 이동)
 // 전략: 정적 자산(CSS/폰트 등)만 캐시, HTML과 API는 항상 네트워크 우선
-// → 앱 업데이트·데이터 불러오기 문제 방지
 
 const CACHE_NAME = 'memonest-v2.5.0';
 
@@ -44,7 +44,7 @@ self.addEventListener('fetch', event => {
   if (url.pathname.startsWith('/api/')) return;
 
   // app.js / sw.js 자체 → 항상 네트워크 (최신 코드 보장)
-  if (url.pathname.startsWith('/static/app.js') || url.pathname.startsWith('/static/sw.js')) return;
+  if (url.pathname.startsWith('/static/app.js') || url.pathname === '/sw.js') return;
 
   // 외부 CDN 정적 자산 → Cache First (네트워크 비용 절감)
   if (url.origin !== self.location.origin) {
