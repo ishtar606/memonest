@@ -186,6 +186,95 @@ const MemoNest = {
     if (onConfirm) document.getElementById('modal-confirm-btn').onclick = onConfirm;
   },
 
+  // ══════════════════════════════════════════════════════════════════════════
+  // 통합 검색 — 전 모듈(일정·ToDo·회의록·아이디어·소설·쇼핑·일기) 제목/내용 검색
+  // ══════════════════════════════════════════════════════════════════════════
+  // 모듈별 API 경로 + 제목/부가 텍스트 프로퍼티 정의
+  _searchModules: [
+    { key:'todo',     mod:'todo',     icon:'📋', label:'할 일',   path:'todos',     title:'할 일',        extra:['메모'] },
+    { key:'schedule', mod:'schedule', icon:'📅', label:'일정',    path:'schedules', title:'일정 제목',    extra:['장소','메모'] },
+    { key:'meeting',  mod:'meeting',  icon:'🎙️', label:'회의록',  path:'meetings',  title:'회의 제목',    extra:['요약','고객사/프로젝트'] },
+    { key:'shopping', mod:'shopping', icon:'🛒', label:'장보기',  path:'shopping',  title:'아이템',       extra:['구매처 추천'] },
+    { key:'idea',     mod:'idea',     icon:'💡', label:'아이디어', path:'ideas',     title:'아이디어 제목', extra:['핵심 내용'] },
+    { key:'novel',    mod:'novel',    icon:'📖', label:'소설',    path:'novels',    title:'작품명',       extra:['핵심 소재','배경'] },
+    { key:'diary',    mod:'diary',    icon:'📔', label:'일기',    path:'diary',     title:'제목',         extra:['한줄 요약'] },
+  ],
+
+  showSearch() {
+    this.showModal('🔍 통합 검색', `
+      <input class="form-input" id="global-search-input" placeholder="제목·내용으로 검색 (2글자 이상)"
+        type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"
+        oninput="MemoNest._onSearchInput(this.value)">
+      <div id="global-search-results" style="margin-top:12px;max-height:50vh;overflow-y:auto">
+        <div style="font-size:12px;color:#94a3b8;text-align:center;padding:16px 0">검색어를 입력하세요</div>
+      </div>`);
+    setTimeout(() => document.getElementById('global-search-input')?.focus(), 80);
+  },
+
+  _onSearchInput(q) {
+    clearTimeout(this._searchTimer);
+    const query = (q || '').trim();
+    const el = document.getElementById('global-search-results');
+    if (!el) return;
+    if (query.length < 2) {
+      el.innerHTML = `<div style="font-size:12px;color:#94a3b8;text-align:center;padding:16px 0">2글자 이상 입력하세요</div>`;
+      return;
+    }
+    el.innerHTML = `<div style="font-size:12px;color:#94a3b8;text-align:center;padding:16px 0"><span class="spinner" style="width:14px;height:14px;border-width:2px;display:inline-block"></span> 검색 중...</div>`;
+    this._searchTimer = setTimeout(() => this._runSearch(query), 350);
+  },
+
+  async _runSearch(query) {
+    const el = document.getElementById('global-search-results');
+    if (!el) return;
+    const q = query.toLowerCase();
+    const mods = this._searchModules.filter(m => this.state.dbIds[m.key]);
+    // 모든 모듈 병렬 조회
+    const settled = await Promise.all(mods.map(async m => {
+      try {
+        const res = await fetch(`/api/${m.path}?dbId=${this.state.dbIds[m.key]}`);
+        const data = await res.json();
+        if (data.object === 'error' || !data.results) return { m, hits: [] };
+        const hits = [];
+        for (const page of data.results) {
+          const props = page.properties || {};
+          const title = props[m.title]?.title?.[0]?.text?.content || props[m.title]?.title?.[0]?.plain_text || '';
+          let extraText = '';
+          for (const ex of (m.extra || [])) {
+            extraText += ' ' + (props[ex]?.rich_text?.map(r => r.plain_text || r.text?.content || '').join('') || '');
+          }
+          const hay = (title + ' ' + extraText).toLowerCase();
+          if (hay.includes(q)) hits.push({ title: title || '(제목 없음)', snippet: extraText.trim().slice(0, 60) });
+        }
+        return { m, hits };
+      } catch (_) { return { m, hits: [] }; }
+    }));
+
+    const groups = settled.filter(s => s.hits.length);
+    const total = groups.reduce((n, g) => n + g.hits.length, 0);
+    if (!total) {
+      el.innerHTML = `<div style="font-size:13px;color:#94a3b8;text-align:center;padding:20px 0">"${query}" 검색 결과가 없어요</div>`;
+      return;
+    }
+    const esc = s => (s || '').replace(/</g,'&lt;');
+    el.innerHTML = `<div style="font-size:11px;color:#94a3b8;margin-bottom:8px">${total}건 발견</div>` +
+      groups.map(g => `
+        <div style="margin-bottom:10px">
+          <div style="font-size:11px;font-weight:700;color:#64748b;margin-bottom:4px">${g.m.icon} ${g.m.label} (${g.hits.length})</div>
+          ${g.hits.slice(0, 8).map(h => `
+            <div data-mod="${g.m.mod}" onclick="MemoNest._gotoSearchResult(this.dataset.mod)"
+              style="padding:8px 10px;border:1px solid #f1f5f9;border-radius:8px;margin-bottom:4px;cursor:pointer">
+              <div style="font-size:13px;font-weight:600;color:#1e293b;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(h.title)}</div>
+              ${h.snippet ? `<div style="font-size:11px;color:#94a3b8;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(h.snippet)}</div>` : ''}
+            </div>`).join('')}
+        </div>`).join('');
+  },
+
+  _gotoSearchResult(mod) {
+    document.getElementById('app-modal')?.remove();
+    this.navigate(mod);
+  },
+
   // ── Is PC ──────────────────────────────────────────────────────────────────
   isPC() { return window.innerWidth >= 768; },
 
@@ -262,6 +351,9 @@ const MemoNest = {
         <h1>🪺 MemoNest</h1>
         <p>스마트 노션 메모앱</p>
       </div>
+      <button onclick="MemoNest.showSearch()" style="margin:0 16px 8px;width:calc(100% - 32px);display:flex;align-items:center;gap:8px;padding:9px 12px;background:#f1f5f9;border:1px solid var(--border);border-radius:10px;cursor:pointer;color:#64748b;font-size:13px">
+        <span>🔍</span><span>통합 검색</span>
+      </button>
       ${navGroups.map(group => `
         <div class="pc-nav-section">
           <div class="pc-nav-label">${group.label}</div>
@@ -734,6 +826,9 @@ const MemoNest = {
           ${this.state.currentUser.avatar ? `<img src="${this.state.currentUser.avatar}" style="width:20px;height:20px;border-radius:50%;object-fit:cover" alt="">` : `<div style="width:20px;height:20px;border-radius:50%;background:linear-gradient(135deg,#6366f1,#8b5cf6);display:flex;align-items:center;justify-content:center;color:white;font-size:9px;font-weight:700">${(this.state.currentUser.name||this.state.currentUser.email||'?')[0].toUpperCase()}</div>`}
           <span style="max-width:60px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${(this.state.currentUser.name||'').split(' ')[0] || ''}</span>
         </div>` : ''}
+        <button class="header-btn" onclick="MemoNest.showSearch()" title="통합 검색">
+          <i class="fas fa-search"></i>
+        </button>
         <button class="header-btn" onclick="MemoNest.openNotionLink()" title="노션에서 보기">
           <i class="fas fa-external-link-alt"></i>
         </button>
