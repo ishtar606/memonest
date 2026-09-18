@@ -73,37 +73,68 @@ export default async (req: Request) => {
   let sent = 0, failed = 0
   const staleEndpoints: string[] = []
 
+  // 반복 규칙에 따라 base 시작시각의 "후보 발생 시각들"을 now 근처(±2일)로 생성
+  // (리마인더는 최대 1일 전이므로 이 범위면 충분)
+  const occurrenceStarts = (baseIso: string, repeat: string): number[] => {
+    const base = new Date(baseIso).getTime()
+    if (!repeat || repeat === '없음') return [base]
+    const winStart = now - 2 * 86400000
+    const winEnd = now + 2 * 86400000
+    const out: number[] = []
+    if (repeat === '매일' || repeat === '매주' || repeat === '격주') {
+      const stepMs = (repeat === '매일' ? 1 : repeat === '매주' ? 7 : 14) * 86400000
+      // base 로부터 winStart 이전 가장 가까운 지점부터 전진
+      let t = base
+      if (t < winStart) {
+        const k = Math.ceil((winStart - t) / stepMs)
+        t = base + k * stepMs
+      }
+      let guard = 0
+      while (t <= winEnd && guard++ < 40) { out.push(t); t += stepMs }
+    } else if (repeat === '매월') {
+      const bd = new Date(baseIso)
+      for (let m = -2; m <= 2; m++) {
+        const d = new Date(bd); d.setMonth(d.getMonth() + m)
+        const ts = d.getTime()
+        if (ts >= winStart && ts <= winEnd) out.push(ts)
+      }
+    }
+    return out.length ? out : [base]
+  }
+
   for (const s of subs) {
     const schedules = await loadSchedules(s.scheduleDbId)
     for (const sch of schedules) {
       const props = sch.properties
       const startIso = props?.['날짜/시간']?.date?.start
       const reminder = props?.['알림']?.select?.name || ''
+      const repeat = props?.['반복']?.select?.name || '없음'
       const title = props?.['일정 제목']?.title?.[0]?.text?.content || '일정'
       const location = props?.['장소']?.rich_text?.[0]?.text?.content || ''
       if (!startIso) continue
       const remMin = REMINDER_MIN[reminder]
       if (!remMin) continue // '없음' 또는 미설정
 
-      const notifyAt = new Date(startIso).getTime() - remMin * 60 * 1000
-      // 알림 시각이 [now, now+5분) 창에 들어오면 발송
-      if (notifyAt >= now && notifyAt < now + windowMs) {
-        const startLabel = new Date(startIso).toLocaleString('ko-KR', {
-          month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false,
-        })
-        const body = `${startLabel} 시작${location ? ' · ' + location.split('\n')[0] : ''}`
-        try {
-          await webpush.sendNotification(s.sub, JSON.stringify({
-            title: `⏰ ${title}`,
-            body: `${reminder} 알림 — ${body}`,
-            url: '/',
-            tag: `sched-${sch.id}`,
-          }))
-          sent++
-        } catch (e: any) {
-          failed++
-          // 만료/삭제된 구독(404/410)은 비활성 처리
-          if (e?.statusCode === 404 || e?.statusCode === 410) staleEndpoints.push(s.pageId)
+      // 반복 포함 모든 후보 발생 시각에 대해 알림 창 확인
+      for (const startMs of occurrenceStarts(startIso, repeat)) {
+        const notifyAt = startMs - remMin * 60 * 1000
+        if (notifyAt >= now && notifyAt < now + windowMs) {
+          const startLabel = new Date(startMs).toLocaleString('ko-KR', {
+            month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false,
+          })
+          const body = `${startLabel} 시작${location ? ' · ' + location.split('\n')[0] : ''}`
+          try {
+            await webpush.sendNotification(s.sub, JSON.stringify({
+              title: `⏰ ${title}`,
+              body: `${reminder} 알림 — ${body}`,
+              url: '/',
+              tag: `sched-${sch.id}-${startMs}`,
+            }))
+            sent++
+          } catch (e: any) {
+            failed++
+            if (e?.statusCode === 404 || e?.statusCode === 410) staleEndpoints.push(s.pageId)
+          }
         }
       }
     }

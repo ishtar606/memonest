@@ -3095,6 +3095,7 @@ const MemoNest = {
           location:    props['장소']?.rich_text?.[0]?.text?.content || '',
           category:    props['카테고리']?.select?.name || '',
           reminder:    props['알림']?.select?.name || '',
+          repeat:      props['반복']?.select?.name || '없음',
           memo:        props['메모']?.rich_text?.[0]?.text?.content || '',
         };
       });
@@ -3181,10 +3182,12 @@ const MemoNest = {
     const today = new Date(_tzNow.getUTCFullYear(), _tzNow.getUTCMonth(), _tzNow.getUTCDate());
 
     // 이벤트 날짜 Set (빠른 조회용) — 선택된 타임존 기준 날짜로 버킷팅
-    // (저장 ISO의 slice(0,10)은 일정 저장 시 타임존 기준이라, 보기 타임존과 다르면 하루 어긋남)
+    // 반복 일정은 현재 보이는 범위(±약 6주)로 전개해 점 표시
     const eventDates = new Set();
-    Object.values(this._scheduleCache || {}).forEach(s => {
-      if (s.datetime) eventDates.add(this._tzDateKey(s.datetime));
+    const rs = new Date(anchor.getFullYear(), anchor.getMonth() - 1, 1);
+    const re = new Date(anchor.getFullYear(), anchor.getMonth() + 2, 0);
+    this._expandScheduleOccurrences(rs, re).forEach(o => {
+      if (o.datetime) eventDates.add(this._tzDateKey(o.datetime));
     });
 
     // 탭 버튼
@@ -3303,9 +3306,12 @@ const MemoNest = {
     // 해당 날짜의 시간대별 일정 표시
     const dateStr = `${anchor.getFullYear()}-${String(anchor.getMonth()+1).padStart(2,'0')}-${String(anchor.getDate()).padStart(2,'0')}`;
     const isToday = anchor.toDateString() === today.toDateString();
-    const daySchedules = Object.entries(this._scheduleCache || {}).filter(([,s]) =>
-      s.datetime && this._tzDateKey(s.datetime) === dateStr
-    ).sort(([,a],[,b]) => a.datetime.localeCompare(b.datetime));
+    const dayStart = new Date(anchor.getFullYear(), anchor.getMonth(), anchor.getDate() - 1);
+    const dayEnd = new Date(anchor.getFullYear(), anchor.getMonth(), anchor.getDate() + 1);
+    const daySchedules = this._expandScheduleOccurrences(dayStart, dayEnd)
+      .filter(o => o.datetime && this._tzDateKey(o.datetime) === dateStr)
+      .sort((a, b) => a.datetime.localeCompare(b.datetime))
+      .map(o => [o.sid, { ...o.s, datetime: o.datetime, endDatetime: o.endDatetime, _occ: o.occ }]);
 
     return `
       <div style="text-align:center;padding:6px 0 10px">
@@ -3319,7 +3325,7 @@ const MemoNest = {
           return `<div style="display:flex;gap:8px;padding:6px 8px;margin-bottom:4px;border-radius:8px;background:${cs.bg};border-left:3px solid ${cs.dot};cursor:pointer"
             onclick="MemoNest.showEditScheduleById('${sid}')">
             <span style="font-size:11px;color:${cs.tag};font-weight:600;white-space:nowrap">${timeStr}</span>
-            <span style="font-size:12px;font-weight:600;color:#374151;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${s.title}</span>
+            <span style="font-size:12px;font-weight:600;color:#374151;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${s._occ ? '🔁 ' : ''}${s.title}</span>
           </div>`;
         }).join('') : '<div style="text-align:center;padding:16px;font-size:12px;color:#9ca3af">일정 없음</div>'}
       </div>`;
@@ -3382,7 +3388,11 @@ const MemoNest = {
     const anchor = this._schedView.anchor ? new Date(this._schedView.anchor) : new Date();
     const selectedDate = this._schedView.selectedDate;
 
-    const allItems = Object.entries(this._scheduleCache || {});
+    // 반복 일정을 현재 보이는 범위(anchor 월 ±1)로 전개한 뒤 필터
+    const _rs = new Date(anchor.getFullYear(), anchor.getMonth() - 1, 1);
+    const _re = new Date(anchor.getFullYear(), anchor.getMonth() + 2, 0);
+    const allItems = this._expandScheduleOccurrences(_rs, _re)
+      .map(o => [o.sid, { ...o.s, datetime: o.datetime, endDatetime: o.endDatetime, _occ: o.occ }]);
 
     // 필터 함수
     let filtered = [];
@@ -3478,6 +3488,7 @@ const MemoNest = {
               ${timeStr ? `<div style="font-size:11px;color:#64748b;margin-bottom:4px"><i class="fas fa-clock" style="margin-right:3px"></i>${timeStr}</div>` : ''}
               <div style="display:flex;gap:4px;flex-wrap:wrap;align-items:center">
                 ${s.category ? `<span style="font-size:10px;font-weight:700;color:${cs.tag};background:white;border:1px solid ${cs.border};padding:1px 8px;border-radius:10px">${s.category}</span>` : ''}
+                ${s.repeat && s.repeat!=='없음' ? `<span style="font-size:10px;color:#7c3aed;background:#ede9fe;border-radius:10px;padding:1px 7px">🔁${s.repeat}</span>` : ''}
                 ${s.location ? this._renderLocationBadge(s.location) : ''}
                 ${s.reminder && s.reminder!=='없음' ? `<span style="font-size:10px;color:#d97706;background:#fef3c7;border-radius:10px;padding:1px 7px">🔔${s.reminder}</span>` : ''}
               </div>
@@ -3500,10 +3511,10 @@ const MemoNest = {
   showEditScheduleById(pageId) {
     const d = this._scheduleCache?.[pageId];
     if (!d) { this.toast('일정 데이터를 찾을 수 없어요. 새로고침 후 다시 시도해주세요.', 'error'); return; }
-    this.showEditSchedule(pageId, d.title, d.datetime, d.location, d.category, d.reminder, d.memo, d.endDatetime);
+    this.showEditSchedule(pageId, d.title, d.datetime, d.location, d.category, d.reminder, d.memo, d.endDatetime, d.repeat);
   },
 
-  showEditSchedule(pageId, title, datetimeRaw, location, category, reminder, memo, endDatetimeRaw) {
+  showEditSchedule(pageId, title, datetimeRaw, location, category, reminder, memo, endDatetimeRaw, repeat) {
     // 시작 Date + 초기 소요시간(분) 산출
     const startDate = datetimeRaw ? new Date(datetimeRaw) : new Date();
     let durationMin = 60;
@@ -3530,6 +3541,12 @@ const MemoNest = {
             ${['없음','10분 전','1시간 전','1일 전'].map(r => `<option value="${r}" ${reminder===r?'selected':''}>${r}</option>`).join('')}
           </select>
         </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">🔁 반복</label>
+        <select class="form-select" id="edit-sch-repeat">
+          ${['없음','매일','매주','격주','매월'].map(r => `<option value="${r}" ${(repeat||'없음')===r?'selected':''}>${r}</option>`).join('')}
+        </select>
       </div>
       <div class="form-group">
         <label class="form-label">📍 장소</label>
@@ -3588,6 +3605,8 @@ const MemoNest = {
           ),
           category: document.getElementById('edit-sch-category')?.value,
           reminder: document.getElementById('edit-sch-reminder')?.value,
+          repeat: document.getElementById('edit-sch-repeat')?.value,
+          dbId: this.state.dbIds.schedule,
           memo: document.getElementById('edit-sch-memo')?.value || '',
         })
       });
@@ -4033,6 +4052,50 @@ const MemoNest = {
     return `${d.getUTCFullYear()}-${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())}`;
   },
 
+  // ── 반복 일정 전개 ─────────────────────────────────────────────────────────
+  // _scheduleCache의 base 일정을 [rangeStart, rangeEnd] 범위 내 가상 인스턴스로 확장.
+  // 반환: [{ sid, datetime, endDatetime, occ }] (occ=true면 반복으로 생성된 가상 인스턴스)
+  // 원본 편집/삭제는 sid(원본 pageId)로 동작하며, 시리즈 전체에 적용됨.
+  _expandScheduleOccurrences(rangeStart, rangeEnd) {
+    const out = [];
+    const addMonths = (d, n) => { const x = new Date(d); x.setMonth(x.getMonth()+n); return x; };
+    const entries = Object.entries(this._scheduleCache || {});
+    for (const [sid, s] of entries) {
+      if (!s.datetime) continue;
+      const base = new Date(s.datetime);
+      const durMs = s.endDatetime ? (new Date(s.endDatetime) - base) : 0;
+      const rep = s.repeat || '없음';
+      // 원본은 항상 포함
+      out.push({ sid, s, datetime: s.datetime, endDatetime: s.endDatetime, occ: false });
+      if (rep === '없음' || !rep) continue;
+      // 반복 간격
+      const stepDays = rep === '매일' ? 1 : rep === '매주' ? 7 : rep === '격주' ? 14 : 0;
+      let guard = 0;
+      if (stepDays > 0) {
+        let cur = new Date(base.getTime() + stepDays*24*60*60*1000);
+        while (cur <= rangeEnd && guard++ < 400) {
+          if (cur >= rangeStart) {
+            const iso = this._dateToISO(new Date(cur.getFullYear(),cur.getMonth(),cur.getDate(),base.getHours(),base.getMinutes()));
+            const endIso = durMs ? this._dateToISO(new Date(new Date(cur).getTime()+durMs)) : '';
+            out.push({ sid, s, datetime: iso, endDatetime: endIso, occ: true });
+          }
+          cur = new Date(cur.getTime() + stepDays*24*60*60*1000);
+        }
+      } else if (rep === '매월') {
+        let cur = addMonths(base, 1);
+        while (cur <= rangeEnd && guard++ < 60) {
+          if (cur >= rangeStart) {
+            const iso = this._dateToISO(new Date(cur.getFullYear(),cur.getMonth(),cur.getDate(),base.getHours(),base.getMinutes()));
+            const endIso = durMs ? this._dateToISO(new Date(new Date(cur).getTime()+durMs)) : '';
+            out.push({ sid, s, datetime: iso, endDatetime: endIso, occ: true });
+          }
+          cur = addMonths(cur, 1);
+        }
+      }
+    }
+    return out;
+  },
+
   // 선택 타임존 기준 날짜/시간 라벨
   _fmtSchedTime(iso, withDate = true) {
     const d = this._instantInTz(iso);
@@ -4086,6 +4149,12 @@ const MemoNest = {
         </div>
       </div>
       <div class="form-group">
+        <label class="form-label">🔁 반복</label>
+        <select class="form-select" id="sch-repeat">
+          <option>없음</option><option>매일</option><option>매주</option><option>격주</option><option>매월</option>
+        </select>
+      </div>
+      <div class="form-group">
         <label class="form-label">📍 장소</label>
         <input class="form-input" id="sch-location" placeholder="강남역 스타벅스 (선택)"
           oninput="MemoNest.onLocationInput('sch-location')">
@@ -4133,6 +4202,7 @@ const MemoNest = {
           ),
           category: document.getElementById('sch-category')?.value,
           reminder: document.getElementById('sch-reminder')?.value,
+          repeat: document.getElementById('sch-repeat')?.value,
           memo: document.getElementById('sch-memo')?.value,
         })
       });

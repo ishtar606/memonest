@@ -316,6 +316,13 @@ app.post('/api/notion/init', async (c) => {
           { name: '1시간 전', color: 'yellow' },
           { name: '1일 전', color: 'red' }
         ]}},
+        '반복': { select: { options: [
+          { name: '없음', color: 'default' },
+          { name: '매일', color: 'blue' },
+          { name: '매주', color: 'purple' },
+          { name: '격주', color: 'pink' },
+          { name: '매월', color: 'orange' }
+        ]}},
         '메모': { rich_text: {} },
         '생성일': { created_time: {} },
       }
@@ -1088,6 +1095,8 @@ app.patch('/api/schedules/:pageId', async (c) => {
   if (body.location !== undefined) properties['장소'] = { rich_text: body.location ? [{ text: { content: body.location } }] : [] }
   if (body.category) properties['카테고리'] = { select: { name: body.category } }
   if (body.reminder) properties['알림'] = { select: { name: body.reminder } }
+  if (body.repeat !== undefined && body.repeat && body.repeat !== '없음' && body.dbId) await ensureScheduleRepeatProp(apiKey, body.dbId)
+  if (body.repeat !== undefined) properties['반복'] = (body.repeat && body.repeat !== '없음') ? { select: { name: body.repeat } } : { select: null }
   if (body.memo !== undefined) properties['메모'] = { rich_text: body.memo ? [{ text: { content: body.memo } }] : [] }
   const data = await notionRequest(apiKey, `/pages/${pageId}`, 'PATCH', { properties })
   return c.json(data)
@@ -1175,9 +1184,32 @@ app.get('/api/novels', async (c) => {
 })
 
 // ─── Schedule API ─────────────────────────────────────────────────────────────
+
+// 기존 일정 DB에 '반복' select 프로퍼티가 없으면 추가 (구버전 DB 호환)
+async function ensureScheduleRepeatProp(apiKey: string, dbId: string) {
+  try {
+    const db = await notionRequest(apiKey, `/databases/${dbId}`)
+    if (db?.properties && !db.properties['반복']) {
+      await notionRequest(apiKey, `/databases/${dbId}`, 'PATCH', {
+        properties: {
+          '반복': { select: { options: [
+            { name: '없음', color: 'default' },
+            { name: '매일', color: 'blue' },
+            { name: '매주', color: 'purple' },
+            { name: '격주', color: 'pink' },
+            { name: '매월', color: 'orange' },
+          ]}},
+        },
+      })
+    }
+  } catch (_) { /* 실패해도 저장은 시도 */ }
+}
+
 app.post('/api/schedules', async (c) => {
   const apiKey = c.env.NOTION_API_KEY
-  const { dbId, title, datetime, endDatetime, location, category, reminder, memo } = await c.req.json()
+  const { dbId, title, datetime, endDatetime, location, category, reminder, memo, repeat } = await c.req.json()
+
+  if (repeat && repeat !== '없음') await ensureScheduleRepeatProp(apiKey, dbId)
 
   const properties: any = {
     '일정 제목': { title: [{ text: { content: title } }] },
@@ -1186,6 +1218,7 @@ app.post('/api/schedules', async (c) => {
   }
   if (location) properties['장소'] = { rich_text: [{ text: { content: location } }] }
   if (reminder) properties['알림'] = { select: { name: reminder } }
+  if (repeat && repeat !== '없음') properties['반복'] = { select: { name: repeat } }
   if (memo) properties['메모'] = { rich_text: [{ text: { content: memo } }] }
 
   const data = await notionRequest(apiKey, '/pages', 'POST', {
