@@ -4,8 +4,15 @@
 const MemoNest = {
   // ── State ──────────────────────────────────────────────────────────────────
   // ── 앱 버전/개발 로그 ─────────────────────────────────────────────────────
-  VERSION: '2.5.0',
+  VERSION: '2.6.0',
   CHANGELOG: [
+    { ver: '2.6.0', date: '2026-09-18', changes: [
+      '홈 대시보드 강화: 오늘 할 일 + 이번 주 일정 위젯',
+      'ToDo→일정 연계: 할 일을 일정으로 잡기 버튼',
+      '일정 화면에 오늘까지 할 일 마감 배너',
+      '웹푸시 알림: 임박 일정 리마인더(5분 주기)',
+      '회의록 요약 프롬프트 개선 + 노션 토글 구조',
+    ] },
     { ver: '2.5.0', date: '2026-09-17', changes: [
       'Netlify 호스팅 전환 (Notion 데이터 유지)',
       '버그수정: /api 라우팅 404 문제 해결',
@@ -928,6 +935,84 @@ const MemoNest = {
           ${overdue > 0 ? `<div style="margin-top:6px;font-size:11px;color:#ef4444;font-weight:600">⚠️ 기한초과 ${overdue}개</div>` : `<div style="margin-top:6px;font-size:11px;color:#10b981">✅ 기한초과 없음</div>`}`;
       } catch(_) {}
     }
+    // 오늘 할 일 목록 (미완료 우선, 기한초과 강조)
+    const todayTodoEl = document.getElementById('home-today-todos');
+    if (todayTodoEl && this.state.dbIds.todo) {
+      try {
+        const res = await fetch(`/api/todos?dbId=${this.state.dbIds.todo}`);
+        const data = await res.json();
+        const todos = data.results || [];
+        const now = new Date();
+        const todayStr = now.toISOString().split('T')[0];
+        // 미완료 중: 기한초과 → 오늘마감 → 나머지 순
+        const active = todos.filter(t => t.properties['상태']?.select?.name !== '완료');
+        const rank = t => {
+          const d = t.properties['Due Date']?.date?.start;
+          if (d && d < todayStr) return 0;          // 기한초과
+          if (d && d.startsWith(todayStr)) return 1; // 오늘마감
+          if (d) return 2;                            // 향후 마감
+          return 3;                                   // 마감없음
+        };
+        const sorted = active.sort((a, b) => rank(a) - rank(b)).slice(0, 5);
+        if (!sorted.length) {
+          todayTodoEl.innerHTML = `<div style="font-size:12px;color:#94a3b8;text-align:center;padding:8px 0">할 일이 모두 완료됐어요 🎉</div>`;
+        } else {
+          todayTodoEl.innerHTML = sorted.map(t => {
+            const title = t.properties['할 일']?.title?.[0]?.text?.content || '(제목 없음)';
+            const d = t.properties['Due Date']?.date?.start || '';
+            const overdue = d && d < todayStr;
+            const isToday = d && d.startsWith(todayStr);
+            const prio = t.properties['우선순위']?.select?.name || '';
+            const dueLabel = overdue ? `기한초과 ${d.slice(5,10).replace('-','/')}` : isToday ? '오늘 마감' : d ? d.slice(5,10).replace('-','/') : '';
+            const dueColor = overdue ? '#ef4444' : isToday ? '#d97706' : '#94a3b8';
+            return `<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #f1f5f9">
+              <span style="font-size:12px;flex-shrink:0">${prio.includes('높음') ? '🔴' : prio.includes('중간') ? '🟡' : prio.includes('낮음') ? '🟢' : '⚪'}</span>
+              <div style="flex:1;min-width:0;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${title}</div>
+              ${dueLabel ? `<span style="font-size:10px;color:${dueColor};font-weight:600;flex-shrink:0;white-space:nowrap">${dueLabel}</span>` : ''}
+            </div>`;
+          }).join('');
+        }
+      } catch(_) { todayTodoEl.innerHTML = ''; }
+    }
+    // 이번 주 일정 (오늘~+7일)
+    const weekEl = document.getElementById('home-week-schedule');
+    if (weekEl && this.state.dbIds.schedule) {
+      try {
+        const res = await fetch(`/api/schedules?dbId=${this.state.dbIds.schedule}`);
+        const data = await res.json();
+        const results = data.results || [];
+        const now = new Date();
+        const weekLater = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+        const items = results
+          .map(s => ({ s, dt: s.properties['날짜/시간']?.date?.start || '' }))
+          .filter(x => x.dt && new Date(x.dt) >= new Date(now.toISOString().split('T')[0]) && new Date(x.dt) <= weekLater)
+          .sort((a, b) => a.dt.localeCompare(b.dt))
+          .slice(0, 5);
+        if (!items.length) {
+          weekEl.innerHTML = `<div style="font-size:12px;color:#94a3b8;text-align:center;padding:8px 0">이번 주 일정이 없어요 😊</div>`;
+        } else {
+          const todayStr = now.toISOString().split('T')[0];
+          const catColors = { '회의':'#6366f1', '개인':'#10b981', '이벤트':'#f59e0b', '약속':'#ef4444', '기타':'#94a3b8' };
+          const wk = ['일','월','화','수','목','금','토'];
+          weekEl.innerHTML = items.map(({ s, dt }) => {
+            const title = s.properties['일정 제목']?.title?.[0]?.text?.content || '';
+            const dObj = new Date(dt);
+            const isToday = dt.startsWith(todayStr);
+            const cat = s.properties['카테고리']?.select?.name || '';
+            const timeStr = dObj.toLocaleTimeString('ko-KR', { hour:'2-digit', minute:'2-digit', hour12:false });
+            const dayLabel = isToday ? '오늘' : `${dObj.getMonth()+1}/${dObj.getDate()}(${wk[dObj.getDay()]})`;
+            return `<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #f1f5f9">
+              <div style="width:3px;height:32px;border-radius:2px;background:${catColors[cat]||'#6366f1'};flex-shrink:0"></div>
+              <div style="flex:1;min-width:0">
+                <div style="font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${title}</div>
+                <div style="font-size:11px;color:#94a3b8">${dayLabel} ${timeStr}</div>
+              </div>
+              ${isToday ? `<span style="font-size:10px;background:#fef3c7;color:#d97706;padding:2px 6px;border-radius:10px;flex-shrink:0">오늘</span>` : ''}
+            </div>`;
+          }).join('');
+        }
+      } catch(_) { weekEl.innerHTML = ''; }
+    }
   },
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -985,6 +1070,22 @@ const MemoNest = {
           <div id="home-todo-summary" style="font-size:12px;color:#94a3b8;text-align:center;padding:8px 0">로딩 중...</div>
         </div>
       </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px">
+        <div class="card">
+          <div class="card-header" style="margin-bottom:10px">
+            <div class="card-title">✅ 오늘 할 일</div>
+            <button onclick="MemoNest.navigate('todo')" style="font-size:12px;color:#6366f1;background:rgba(99,102,241,0.08);border:none;cursor:pointer;padding:4px 10px;border-radius:20px">전체 보기</button>
+          </div>
+          <div id="home-today-todos"><div style="font-size:12px;color:#94a3b8;text-align:center;padding:8px 0">로딩 중...</div></div>
+        </div>
+        <div class="card">
+          <div class="card-header" style="margin-bottom:10px">
+            <div class="card-title">🗓️ 이번 주 일정</div>
+            <button onclick="MemoNest.navigate('schedule')" style="font-size:12px;color:#6366f1;background:rgba(99,102,241,0.08);border:none;cursor:pointer;padding:4px 10px;border-radius:20px">전체 보기</button>
+          </div>
+          <div id="home-week-schedule"><div style="font-size:12px;color:#94a3b8;text-align:center;padding:8px 0">로딩 중...</div></div>
+        </div>
+      </div>
       <div class="card" style="margin-top:8px">
         <div class="card-header">
           <div class="card-title">💡 MemoNest 사용 가이드</div>
@@ -1030,6 +1131,20 @@ const MemoNest = {
       </div>
       <div id="home-schedule-preview"><div style="font-size:12px;color:#94a3b8;text-align:center;padding:4px 0">로딩 중...</div></div>
     </div>
+    <div class="card" style="margin-bottom:12px">
+      <div class="card-header" style="margin-bottom:10px">
+        <div class="card-title" style="font-size:14px">✅ 오늘 할 일</div>
+        <button onclick="MemoNest.navigate('todo')" style="font-size:11px;color:#6366f1;background:rgba(99,102,241,0.08);border:none;cursor:pointer;padding:3px 8px;border-radius:20px">전체</button>
+      </div>
+      <div id="home-today-todos"><div style="font-size:12px;color:#94a3b8;text-align:center;padding:4px 0">로딩 중...</div></div>
+    </div>
+    <div class="card" style="margin-bottom:12px">
+      <div class="card-header" style="margin-bottom:10px">
+        <div class="card-title" style="font-size:14px">🗓️ 이번 주 일정</div>
+        <button onclick="MemoNest.navigate('schedule')" style="font-size:11px;color:#6366f1;background:rgba(99,102,241,0.08);border:none;cursor:pointer;padding:3px 8px;border-radius:20px">전체</button>
+      </div>
+      <div id="home-week-schedule"><div style="font-size:12px;color:#94a3b8;text-align:center;padding:4px 0">로딩 중...</div></div>
+    </div>
     <div style="padding:12px 14px;background:#f8fafc;border-radius:12px;border:1px solid #e2e8f0;display:flex;align-items:center;justify-content:space-between;gap:8px">
       <div style="font-size:11px;color:#94a3b8">
         <strong style="color:#6366f1">v${this.VERSION}</strong> · ${latestChange.date} · ${latestChange.changes[0]}
@@ -1059,7 +1174,7 @@ const MemoNest = {
       <div style="margin-top:10px;padding-top:10px;border-top:1px solid #e2e8f0;display:flex;align-items:center;gap:6px;font-size:11px;color:#94a3b8">
         <span>${secureIcon}</span>
         <span>${secureText}</span>
-        <span style="margin-left:auto">Hono · Cloudflare Pages · Notion API</span>
+        <span style="margin-left:auto">Hono · Netlify · Notion API</span>
       </div>
     </div>`;
   },
@@ -1132,6 +1247,8 @@ const MemoNest = {
         return ia - ib;
       });
     }
+    // ToDo 캐시 (onclick 인라인 특수문자 버그 방지: data-tid + this.dataset.tid 패턴)
+    this._todoCache = {};
     el.innerHTML = todos.map(todo => {
       const props = todo.properties;
       const title = props['할 일']?.title?.[0]?.text?.content || '제목 없음';
@@ -1141,6 +1258,7 @@ const MemoNest = {
       const tags = props['태그']?.multi_select || [];
       const memo = props['메모']?.rich_text?.[0]?.text?.content || '';
       const repeat = props['반복']?.select?.name || '';
+      this._todoCache[todo.id] = { title, dueDate: dueDate || '', memo };
       const isDone = status === '완료';
       const isOverdue = dueDate && new Date(dueDate) < new Date() && !isDone;
       const priorityClass = priority.includes('높음') ? 'priority-high' : priority.includes('낮음') ? 'priority-low' : 'priority-mid';
@@ -1173,6 +1291,10 @@ const MemoNest = {
             style="background:none;border:1px solid #e2e8f0;border-radius:6px;padding:4px 8px;cursor:pointer;font-size:11px;color:#64748b" title="수정">
             <i class="fas fa-pen"></i>
           </button>
+          <button data-tid="${todo.id}" onclick="MemoNest.scheduleFromTodo(this.dataset.tid)"
+            style="background:none;border:1px solid #e0e7ff;border-radius:6px;padding:4px 8px;cursor:pointer;font-size:11px;color:#6366f1" title="일정으로 잡기">
+            <i class="fas fa-calendar-plus"></i>
+          </button>
           <button onclick="MemoNest.deleteTodo('${todo.id}')" 
             style="background:none;border:1px solid #fee2e2;border-radius:6px;padding:4px 8px;cursor:pointer;font-size:11px;color:#ef4444" title="삭제">
             <i class="fas fa-trash"></i>
@@ -1180,6 +1302,34 @@ const MemoNest = {
         </div>
       </div>`;
     }).join('');
+  },
+
+  // ── ToDo → 일정으로 잡기 ───────────────────────────────────────────────────
+  // ToDo를 일정으로 변환: 일정 추가 모달을 열고 제목/날짜를 미리 채운다.
+  scheduleFromTodo(tid) {
+    const t = this._todoCache?.[tid];
+    if (!t) { this.toast('할 일 정보를 찾을 수 없어요. 새로고침 후 시도해주세요.', 'error'); return; }
+    // 일정 추가 모달 오픈 (기존 시간 컨트롤·타임존 로직 재사용)
+    this.showAddSchedule();
+    // 모달 렌더 후 필드 프리필
+    setTimeout(() => {
+      const titleEl = document.getElementById('sch-title');
+      if (titleEl) titleEl.value = t.title || '';
+      // Due Date 가 있으면 시작 날짜를 그 날짜로 (시간은 기본값 유지)
+      if (t.dueDate) {
+        const dateOnly = t.dueDate.slice(0, 10); // YYYY-MM-DD
+        const startDateEl = document.getElementById('sch-start-date');
+        const endDateEl = document.getElementById('sch-end-date');
+        if (startDateEl) startDateEl.value = dateOnly;
+        if (endDateEl) endDateEl.value = dateOnly;
+        // 시작/종료/소요 연동 재계산 트리거
+        startDateEl?.dispatchEvent(new Event('change'));
+      }
+      // 메모에 원본 할 일 표시
+      const memoEl = document.getElementById('sch-memo');
+      if (memoEl && !memoEl.value) memoEl.value = `📋 ToDo에서 생성${t.memo ? '\n' + t.memo : ''}`;
+      this.toast('할 일을 일정으로 옮겼어요. 시간을 확인하고 저장하세요.', 'info', 3500);
+    }, 60);
   },
 
   // ── Drag & Drop 핸들러 ─────────────────────────────────────────────────────
@@ -2858,6 +3008,7 @@ const MemoNest = {
     return `
     ${this._renderTzBar()}
     ${this._renderPushBanner()}
+    <div id="sched-todo-due"></div>
     ${this._renderGCalBanner()}
     <div id="schedule-split" style="display:${isPC?'grid':'block'};grid-template-columns:1fr 1fr;gap:16px;min-height:0;${isPC?'':''}">
       <!-- 왼쪽: 캘린더 -->
@@ -2920,6 +3071,9 @@ const MemoNest = {
       // (일정 탭에서도 어떤 회의 일정에 회의록이 등록됐는지 알아야 함)
       await this._loadLinkedMeetingIds();
 
+      // 마감 임박/초과 ToDo 배너 (일정 맥락에서 할 일도 함께 인지)
+      this._renderScheduleTodoDue();
+
       // 캘린더 렌더
       this._renderCalendar();
 
@@ -2947,6 +3101,39 @@ const MemoNest = {
       // 실패해도 일정 렌더는 계속 (연동 배지만 생략)
       if (!this._meetingScheduleIds) this._meetingScheduleIds = new Set();
     }
+  },
+
+  // ── 일정 화면: 마감 임박/초과 ToDo 배너 (읽기 전용) ───────────────────────
+  async _renderScheduleTodoDue() {
+    const el = document.getElementById('sched-todo-due');
+    if (!el || !this.state.dbIds.todo) return;
+    try {
+      const res = await fetch(`/api/todos?dbId=${this.state.dbIds.todo}`);
+      const data = await res.json();
+      const todos = data.results || [];
+      const todayStr = new Date().toISOString().split('T')[0];
+      // 미완료 & Due Date 있음 & (오늘 이하 마감)
+      const due = todos.filter(t => {
+        if (t.properties['상태']?.select?.name === '완료') return false;
+        const d = t.properties['Due Date']?.date?.start;
+        return d && d.slice(0, 10) <= todayStr;
+      });
+      if (!due.length) { el.innerHTML = ''; return; }
+      const overdue = due.filter(t => (t.properties['Due Date']?.date?.start || '').slice(0,10) < todayStr).length;
+      const names = due.slice(0, 3).map(t => t.properties['할 일']?.title?.[0]?.text?.content || '').filter(Boolean);
+      const more = due.length > 3 ? ` 외 ${due.length - 3}건` : '';
+      el.innerHTML = `
+      <div onclick="MemoNest.navigate('todo')" style="cursor:pointer;display:flex;align-items:center;gap:10px;padding:10px 14px;background:${overdue ? '#fef2f2' : '#fffbeb'};border:1px solid ${overdue ? '#fecaca' : '#fde68a'};border-radius:12px;margin-bottom:10px">
+        <span style="font-size:18px">${overdue ? '⚠️' : '📋'}</span>
+        <div style="flex:1;min-width:0">
+          <div style="font-size:13px;font-weight:600;color:${overdue ? '#dc2626' : '#d97706'}">
+            오늘까지 할 일 ${due.length}건${overdue ? ` (기한초과 ${overdue}건)` : ''}
+          </div>
+          <div style="font-size:11px;color:#6b7280;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${names.join(', ')}${more}</div>
+        </div>
+        <span style="font-size:11px;color:#6366f1;white-space:nowrap">ToDo ▶</span>
+      </div>`;
+    } catch (_) { el.innerHTML = ''; }
   },
 
   // ── 캘린더 렌더 ───────────────────────────────────────────────────────────
