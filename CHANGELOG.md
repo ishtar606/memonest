@@ -1,5 +1,10 @@
 # Changelog
 
+## [2026-09-18] v3.0.0 (정식 버전)
+- **feat:** 정식 버전 출시 — Netlify + Notion 구조 안정화
+- **feat(UX):** PC 홈 개편 — 사이드바와 중복되던 '빠른 실행' 모듈 그리드 제거, '오늘 할 일'·'이번 주 일정'을 최상단에 우선 배치. 모바일은 사이드바가 없어 바로가기 그리드 유지(하단으로 이동)
+- **fix:** 버전 배너의 스택 표기 Cloudflare Pages → Netlify
+
 ## [2026-09-17]
 - **feat:** Cloudflare Workers → Netlify(Node Functions) 호스팅 전환 (netlify.toml, netlify/functions/api.ts, 정적 index.html), Notion 데이터 계층 유지
 - **fix:** Google OAuth redirect URI를 하드코딩된 gensparksite 도메인 대신 요청 Origin/APP_BASE_URL 기반으로 동적 산출

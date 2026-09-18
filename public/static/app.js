@@ -4,14 +4,15 @@
 const MemoNest = {
   // ── State ──────────────────────────────────────────────────────────────────
   // ── 앱 버전/개발 로그 ─────────────────────────────────────────────────────
-  VERSION: '2.6.0',
+  VERSION: '3.0.0',
   CHANGELOG: [
-    { ver: '2.6.0', date: '2026-09-18', changes: [
-      '홈 대시보드 강화: 오늘 할 일 + 이번 주 일정 위젯',
-      'ToDo→일정 연계: 할 일을 일정으로 잡기 버튼',
-      '일정 화면에 오늘까지 할 일 마감 배너',
-      '웹푸시 알림: 임박 일정 리마인더(5분 주기)',
-      '회의록 요약 프롬프트 개선 + 노션 토글 구조',
+    { ver: '3.0.0', date: '2026-09-18', changes: [
+      '정식 버전 출시 🎉 (Netlify + Notion 안정화)',
+      'PC 홈 개편: 사이드바와 중복되던 빠른실행 그리드 제거',
+      '홈 최상단에 오늘 할 일 + 이번 주 일정 우선 배치',
+      'ToDo→일정 연계 + 일정 화면 마감 배너',
+      '웹푸시 알림(임박 일정 리마인더) + 타임존 선택',
+      '회의록 AI 요약 개선 + 노션 토글 구조',
     ] },
     { ver: '2.5.0', date: '2026-09-17', changes: [
       'Netlify 호스팅 전환 (Notion 데이터 유지)',
@@ -1044,17 +1045,25 @@ const MemoNest = {
         </div>
         <span class="banner-emoji">🪺</span>
       </div>
-      <div style="font-size:13px;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:14px">빠른 실행</div>
-      <div class="pc-module-grid">
-        ${modules.map(m => `
-          <div class="module-card" onclick="${m.id === 'settings' ? 'MemoNest.showSettings()' : `MemoNest.navigate('${m.id}')`}">
-            <span class="icon">${m.icon}</span>
-            <div class="name">${m.name}</div>
-            <div class="count">${m.desc}</div>
-            ${m.id === 'todo' ? `<span id="home-todo-badge" style="display:none;font-size:10px;padding:2px 8px;border-radius:20px;margin-top:4px;font-weight:600"></span>` : ''}
-          </div>`).join('')}
+      <!-- 최상단: 오늘 할 일 + 이번 주 일정 (가장 자주 보는 정보) -->
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px">
+        <div class="card" style="border-top:3px solid #6366f1">
+          <div class="card-header" style="margin-bottom:10px">
+            <div class="card-title">✅ 오늘 할 일 <span id="home-todo-badge" style="display:none;font-size:10px;padding:2px 8px;border-radius:20px;margin-left:6px;font-weight:600"></span></div>
+            <button onclick="MemoNest.navigate('todo')" style="font-size:12px;color:#6366f1;background:rgba(99,102,241,0.08);border:none;cursor:pointer;padding:4px 10px;border-radius:20px">전체 보기</button>
+          </div>
+          <div id="home-today-todos"><div style="font-size:12px;color:#94a3b8;text-align:center;padding:8px 0">로딩 중...</div></div>
+        </div>
+        <div class="card" style="border-top:3px solid #10b981">
+          <div class="card-header" style="margin-bottom:10px">
+            <div class="card-title">🗓️ 이번 주 일정</div>
+            <button onclick="MemoNest.navigate('schedule')" style="font-size:12px;color:#6366f1;background:rgba(99,102,241,0.08);border:none;cursor:pointer;padding:4px 10px;border-radius:20px">전체 보기</button>
+          </div>
+          <div id="home-week-schedule"><div style="font-size:12px;color:#94a3b8;text-align:center;padding:8px 0">로딩 중...</div></div>
+        </div>
       </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px">
+      <!-- 보조: 오늘의 일정 상세 + ToDo 진행률 -->
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
         <div class="card">
           <div class="card-header" style="margin-bottom:10px">
             <div class="card-title">📅 오늘의 일정</div>
@@ -1064,29 +1073,13 @@ const MemoNest = {
         </div>
         <div class="card">
           <div class="card-header" style="margin-bottom:10px">
-            <div class="card-title">📋 ToDo 현황</div>
+            <div class="card-title">📊 ToDo 진행률</div>
             <button onclick="MemoNest.navigate('todo')" style="font-size:12px;color:#6366f1;background:rgba(99,102,241,0.08);border:none;cursor:pointer;padding:4px 10px;border-radius:20px">전체 보기</button>
           </div>
           <div id="home-todo-summary" style="font-size:12px;color:#94a3b8;text-align:center;padding:8px 0">로딩 중...</div>
         </div>
       </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px">
-        <div class="card">
-          <div class="card-header" style="margin-bottom:10px">
-            <div class="card-title">✅ 오늘 할 일</div>
-            <button onclick="MemoNest.navigate('todo')" style="font-size:12px;color:#6366f1;background:rgba(99,102,241,0.08);border:none;cursor:pointer;padding:4px 10px;border-radius:20px">전체 보기</button>
-          </div>
-          <div id="home-today-todos"><div style="font-size:12px;color:#94a3b8;text-align:center;padding:8px 0">로딩 중...</div></div>
-        </div>
-        <div class="card">
-          <div class="card-header" style="margin-bottom:10px">
-            <div class="card-title">🗓️ 이번 주 일정</div>
-            <button onclick="MemoNest.navigate('schedule')" style="font-size:12px;color:#6366f1;background:rgba(99,102,241,0.08);border:none;cursor:pointer;padding:4px 10px;border-radius:20px">전체 보기</button>
-          </div>
-          <div id="home-week-schedule"><div style="font-size:12px;color:#94a3b8;text-align:center;padding:8px 0">로딩 중...</div></div>
-        </div>
-      </div>
-      <div class="card" style="margin-top:8px">
+      <div class="card" style="margin-top:16px">
         <div class="card-header">
           <div class="card-title">💡 MemoNest 사용 가이드</div>
         </div>
@@ -1115,35 +1108,37 @@ const MemoNest = {
       <h2 style="font-size:20px;font-weight:700;margin-bottom:4px">${greeting}</h2>
       <p style="font-size:13px;opacity:0.8">${dateStr}</p>
     </div>
-    <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-bottom:16px">
-      ${modules.map(m => `
-        <div class="module-card" onclick="${m.id === 'settings' ? 'MemoNest.showSettings()' : `MemoNest.navigate('${m.id}')`}">
-          <span class="icon">${m.icon}</span>
-          <div class="name">${m.name}</div>
-          <div class="count">${m.desc}</div>
-          ${m.id === 'todo' ? `<span id="home-todo-badge" style="display:none;font-size:10px;padding:2px 8px;border-radius:20px;margin-top:4px;font-weight:600"></span>` : ''}
-        </div>`).join('')}
+    <!-- 최상단: 오늘 할 일 (가장 중요) -->
+    <div class="card" style="margin-bottom:12px;border-top:3px solid #6366f1">
+      <div class="card-header" style="margin-bottom:10px">
+        <div class="card-title" style="font-size:14px">✅ 오늘 할 일 <span id="home-todo-badge" style="display:none;font-size:10px;padding:2px 8px;border-radius:20px;margin-left:6px;font-weight:600"></span></div>
+        <button onclick="MemoNest.navigate('todo')" style="font-size:11px;color:#6366f1;background:rgba(99,102,241,0.08);border:none;cursor:pointer;padding:3px 8px;border-radius:20px">전체</button>
+      </div>
+      <div id="home-today-todos"><div style="font-size:12px;color:#94a3b8;text-align:center;padding:4px 0">로딩 중...</div></div>
     </div>
-    <div class="card" style="margin-bottom:12px">
+    <div class="card" style="margin-bottom:12px;border-top:3px solid #10b981">
+      <div class="card-header" style="margin-bottom:10px">
+        <div class="card-title" style="font-size:14px">🗓️ 이번 주 일정</div>
+        <button onclick="MemoNest.navigate('schedule')" style="font-size:11px;color:#6366f1;background:rgba(99,102,241,0.08);border:none;cursor:pointer;padding:3px 8px;border-radius:20px">전체</button>
+      </div>
+      <div id="home-week-schedule"><div style="font-size:12px;color:#94a3b8;text-align:center;padding:4px 0">로딩 중...</div></div>
+    </div>
+    <div class="card" style="margin-bottom:16px">
       <div class="card-header" style="margin-bottom:10px">
         <div class="card-title" style="font-size:14px">📅 오늘의 일정</div>
         <button onclick="MemoNest.navigate('schedule')" style="font-size:11px;color:#6366f1;background:rgba(99,102,241,0.08);border:none;cursor:pointer;padding:3px 8px;border-radius:20px">전체</button>
       </div>
       <div id="home-schedule-preview"><div style="font-size:12px;color:#94a3b8;text-align:center;padding:4px 0">로딩 중...</div></div>
     </div>
-    <div class="card" style="margin-bottom:12px">
-      <div class="card-header" style="margin-bottom:10px">
-        <div class="card-title" style="font-size:14px">✅ 오늘 할 일</div>
-        <button onclick="MemoNest.navigate('todo')" style="font-size:11px;color:#6366f1;background:rgba(99,102,241,0.08);border:none;cursor:pointer;padding:3px 8px;border-radius:20px">전체</button>
-      </div>
-      <div id="home-today-todos"><div style="font-size:12px;color:#94a3b8;text-align:center;padding:4px 0">로딩 중...</div></div>
-    </div>
-    <div class="card" style="margin-bottom:12px">
-      <div class="card-header" style="margin-bottom:10px">
-        <div class="card-title" style="font-size:14px">🗓️ 이번 주 일정</div>
-        <button onclick="MemoNest.navigate('schedule')" style="font-size:11px;color:#6366f1;background:rgba(99,102,241,0.08);border:none;cursor:pointer;padding:3px 8px;border-radius:20px">전체</button>
-      </div>
-      <div id="home-week-schedule"><div style="font-size:12px;color:#94a3b8;text-align:center;padding:4px 0">로딩 중...</div></div>
+    <!-- 모바일은 사이드바가 없으므로 모듈 바로가기 그리드 유지 -->
+    <div style="font-size:12px;font-weight:700;color:var(--text-muted);margin-bottom:8px">바로가기</div>
+    <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-bottom:16px">
+      ${modules.map(m => `
+        <div class="module-card" onclick="${m.id === 'settings' ? 'MemoNest.showSettings()' : `MemoNest.navigate('${m.id}')`}">
+          <span class="icon">${m.icon}</span>
+          <div class="name">${m.name}</div>
+          <div class="count">${m.desc}</div>
+        </div>`).join('')}
     </div>
     <div style="padding:12px 14px;background:#f8fafc;border-radius:12px;border:1px solid #e2e8f0;display:flex;align-items:center;justify-content:space-between;gap:8px">
       <div style="font-size:11px;color:#94a3b8">
