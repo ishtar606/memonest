@@ -911,6 +911,92 @@ app.patch('/api/meetings/:pageId', async (c) => {
   return c.json(data)
 })
 
+// 회의록 재정리 — 기존 페이지의 원본 텍스트를 읽어 AI 재요약 후
+// 속성(요약 미리보기/액션 개수/태그)을 갱신하고, 개선된 요약 토글을 본문에 추가(비파괴적)
+app.post('/api/meetings/:pageId/reformat', async (c) => {
+  const apiKey = c.env.NOTION_API_KEY
+  const geminiKey = c.env.GEMINI_API_KEY
+  const pageId = c.req.param('pageId')
+
+  // 1) 페이지 블록에서 원본 텍스트 수집 (문단/토글 내부 포함, 2뎁스까지)
+  const collectText = (blocks: any[]): string => {
+    let out = ''
+    for (const b of blocks) {
+      const rt = b?.[b.type]?.rich_text
+      if (Array.isArray(rt)) out += rt.map((x: any) => x?.plain_text || x?.text?.content || '').join('') + '\n'
+    }
+    return out
+  }
+  const top = await notionRequest(apiKey, `/blocks/${pageId}/children?page_size=100`)
+  let combined = collectText(top.results || [])
+  // 토글 등 자식이 있는 블록 한 뎁스 더 수집
+  for (const b of (top.results || [])) {
+    if (b.has_children) {
+      try {
+        const sub = await notionRequest(apiKey, `/blocks/${b.id}/children?page_size=100`)
+        combined += collectText(sub.results || [])
+      } catch (_) {}
+    }
+  }
+  combined = combined.trim()
+  if (!combined) return c.json({ error: '재정리할 원본 내용을 찾지 못했어요' }, 400)
+
+  // 2) AI 재요약 (신규 저장과 동일한 규칙)
+  let parsed: any = {}
+  try {
+    const structured = await geminiRequest(geminiKey,
+      `너는 내용 정리 도우미다. 아래 "입력 내용"을 근거로 정리한다. 입력 종류와 무관하게 입력 자체를 요약·정리하라.
+- summary/discussion 은 입력이 있으면 반드시 채운다. 원문 사실 보존, 창작 금지.
+- agenda/action_items 는 실제로 있을 때만, 없으면 빈 배열.
+
+입력 내용:
+"""
+${combined.slice(0, 8000)}
+"""
+
+JSON만 반환:
+{"title":"짧은 제목","summary":"요약(3~5문장)","agenda":[],"discussion":"본문 정리","action_items":[],"tags":[]}`
+    )
+    const m = structured.match(/\{[\s\S]*\}/)
+    if (m) parsed = JSON.parse(m[0])
+  } catch (_) {}
+  if (!parsed.summary && !parsed.discussion) {
+    return c.json({ error: 'AI 재요약에 실패했어요 (잠시 후 다시 시도)' }, 502)
+  }
+
+  // 3) 속성 갱신 (미리보기)
+  const previewLine = (s: string, n = 120) => {
+    const one = (s || '').replace(/\s+/g, ' ').trim()
+    return one.length > n ? one.slice(0, n) + '…' : one
+  }
+  const actionCount = (parsed.action_items || []).length
+  const properties: any = {
+    '요약': { rich_text: [{ text: { content: previewLine(parsed.summary) } }] },
+    '액션 아이템': { rich_text: [{ text: { content: actionCount ? `액션 ${actionCount}건 (본문 참조)` : '' } }] },
+  }
+  if (parsed.tags?.length) properties['태그'] = { multi_select: parsed.tags.slice(0, 5).map((t: string) => ({ name: t.slice(0, 100) })) }
+  await notionRequest(apiKey, `/pages/${pageId}`, 'PATCH', { properties })
+
+  // 4) 개선된 요약을 본문에 토글로 추가 (기존 내용 보존, 비파괴적)
+  const chunk = (s: string, n = 1900) => { const o: string[] = []; for (let i=0;i<s.length;i+=n) o.push(s.slice(i,i+n)); return o.length?o:[''] }
+  const paras = (t: string) => chunk(t||'').map(x => ({ object:'block', type:'paragraph', paragraph:{ rich_text:[{ type:'text', text:{ content:x } }] } }))
+  const children: any[] = [
+    { object:'block', type:'divider', divider:{} },
+    { object:'block', type:'toggle', toggle:{
+      rich_text:[{ type:'text', text:{ content:`🔄 재정리된 요약 (${new Date().toISOString().slice(0,10)})` } }],
+      children:[
+        { object:'block', type:'heading_3', heading_3:{ rich_text:[{ text:{ content:'📝 요약' } }] } },
+        ...paras(parsed.summary || ''),
+        ...(parsed.discussion ? [{ object:'block', type:'heading_3', heading_3:{ rich_text:[{ text:{ content:'💬 주요 내용' } }] } }, ...paras(parsed.discussion)] : []),
+        ...((parsed.action_items||[]).length ? [{ object:'block', type:'heading_3', heading_3:{ rich_text:[{ text:{ content:'✅ 액션 아이템' } }] } }, ...parsed.action_items.map((it:string)=>({ object:'block', type:'to_do', to_do:{ rich_text:[{ text:{ content:it } }], checked:false } }))] : []),
+      ],
+    } },
+  ]
+  await notionRequest(apiKey, `/blocks/${pageId}/children`, 'PATCH', { children })
+
+  return c.json({ success: true, structured: parsed })
+})
+
 // ─── Shopping List API ────────────────────────────────────────────────────────
 app.post('/api/shopping', async (c) => {
   const apiKey = c.env.NOTION_API_KEY

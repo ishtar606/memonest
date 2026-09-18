@@ -847,173 +847,159 @@ const MemoNest = {
   },
 
   async loadHomeSummary() {
-    // 홈 대시보드용 미완료 ToDo 카운트 로드
+    // todos / schedules 를 각각 1회만 fetch 해서 모든 홈 위젯이 공유 (중복 호출 제거)
+    const [todos, schedules] = await Promise.all([
+      (this.state.dbIds.todo
+        ? fetch(`/api/todos?dbId=${this.state.dbIds.todo}`).then(r => r.json()).then(d => d.results || []).catch(() => [])
+        : Promise.resolve([])),
+      (this.state.dbIds.schedule
+        ? fetch(`/api/schedules?dbId=${this.state.dbIds.schedule}`).then(r => r.json()).then(d => d.results || []).catch(() => [])
+        : Promise.resolve([])),
+    ]);
+    this._fillHomeTodoBadge(todos);
+    this._fillHomeTodoSummary(todos);
+    this._fillHomeTodayTodos(todos);
+    this._fillHomeSchedulePreview(schedules);
+    this._fillHomeWeekSchedule(schedules);
+  },
+
+  _fillHomeTodoBadge(todos) {
     const el = document.getElementById('home-todo-badge');
-    if (el && this.state.dbIds.todo) {
-      try {
-        const res = await fetch(`/api/todos?dbId=${this.state.dbIds.todo}`);
-        const data = await res.json();
-        const todos = data.results || [];
-        const undone = todos.filter(t => t.properties['상태']?.select?.name !== '완료').length;
-        const overdue = todos.filter(t => {
-          const d = t.properties['Due Date']?.date?.start;
-          const s = t.properties['상태']?.select?.name;
-          return d && new Date(d) < new Date() && s !== '완료';
-        }).length;
-        if (undone > 0) {
-          el.textContent = undone + '개 미완료' + (overdue > 0 ? ` · ⚠️${overdue}개 기한초과` : '');
-          el.style.display = 'inline-block';
-          el.style.background = overdue > 0 ? '#fee2e2' : 'rgba(99,102,241,0.12)';
-          el.style.color = overdue > 0 ? '#ef4444' : '#6366f1';
-        }
-      } catch (_) {}
+    if (!el) return;
+    const undone = todos.filter(t => t.properties['상태']?.select?.name !== '완료').length;
+    const overdue = todos.filter(t => {
+      const d = t.properties['Due Date']?.date?.start;
+      const s = t.properties['상태']?.select?.name;
+      return d && new Date(d) < new Date() && s !== '완료';
+    }).length;
+    if (undone > 0) {
+      el.textContent = undone + '개 미완료' + (overdue > 0 ? ` · ⚠️${overdue}개 기한초과` : '');
+      el.style.display = 'inline-block';
+      el.style.background = overdue > 0 ? '#fee2e2' : 'rgba(99,102,241,0.12)';
+      el.style.color = overdue > 0 ? '#ef4444' : '#6366f1';
     }
-    // 오늘 일정 미리보기 로드
+  },
+
+  _fillHomeSchedulePreview(results) {
     const schedEl = document.getElementById('home-schedule-preview');
-    if (schedEl && this.state.dbIds.schedule) {
-      try {
-        const res = await fetch(`/api/schedules?dbId=${this.state.dbIds.schedule}`);
-        const data = await res.json();
-        const results = data.results || [];
-        const todayStr = new Date().toISOString().split('T')[0];
-        const todayItems = results.filter(s => {
-          const dt = s.properties['날짜/시간']?.date?.start || '';
-          return dt.startsWith(todayStr);
-        });
-        const upcomingItems = results.filter(s => {
-          const dt = s.properties['날짜/시간']?.date?.start || '';
-          return dt > new Date().toISOString() && !dt.startsWith(todayStr);
-        }).slice(0, 2);
-        const showItems = [...todayItems, ...upcomingItems].slice(0, 3);
-        if (!showItems.length) {
-          schedEl.innerHTML = `<div style="font-size:12px;color:#94a3b8;text-align:center;padding:8px 0">오늘 예정된 일정이 없어요 😊</div>`;
-        } else {
-          schedEl.innerHTML = showItems.map(s => {
-            const title = s.properties['일정 제목']?.title?.[0]?.text?.content || '';
-            const dtRaw = s.properties['날짜/시간']?.date?.start || '';
-            const dtObj = dtRaw ? new Date(dtRaw) : null;
-            const isToday = dtRaw.startsWith(todayStr);
-            const timeStr = dtObj ? dtObj.toLocaleTimeString('ko-KR', { hour:'2-digit', minute:'2-digit', hour12:false }) : '';
-            const cat = s.properties['카테고리']?.select?.name || '';
-            const catColors = { '회의':'#6366f1', '개인':'#10b981', '이벤트':'#f59e0b', '약속':'#ef4444', '기타':'#94a3b8' };
-            return `<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #f1f5f9">
-              <div style="width:3px;height:32px;border-radius:2px;background:${catColors[cat]||'#6366f1'};flex-shrink:0"></div>
-              <div style="flex:1;min-width:0">
-                <div style="font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${title}</div>
-                <div style="font-size:11px;color:#94a3b8">${isToday ? '오늘' : dtRaw.slice(5,10).replace('-','/')} ${timeStr}</div>
-              </div>
-              ${isToday ? `<span style="font-size:10px;background:#fef3c7;color:#d97706;padding:2px 6px;border-radius:10px;flex-shrink:0">오늘</span>` : ''}
-            </div>`;
-          }).join('');
-        }
-      } catch(_) {
-        schedEl.innerHTML = '';
-      }
+    if (!schedEl) return;
+    const todayStr = new Date().toISOString().split('T')[0];
+    const todayItems = results.filter(s => (s.properties['날짜/시간']?.date?.start || '').startsWith(todayStr));
+    const upcomingItems = results.filter(s => {
+      const dt = s.properties['날짜/시간']?.date?.start || '';
+      return dt > new Date().toISOString() && !dt.startsWith(todayStr);
+    }).slice(0, 2);
+    const showItems = [...todayItems, ...upcomingItems].slice(0, 3);
+    if (!showItems.length) {
+      schedEl.innerHTML = `<div style="font-size:12px;color:#94a3b8;text-align:center;padding:8px 0">오늘 예정된 일정이 없어요 😊</div>`;
+      return;
     }
-    // PC 홈 ToDo 현황 카드 업데이트
+    const catColors = { '회의':'#6366f1', '개인':'#10b981', '이벤트':'#f59e0b', '약속':'#ef4444', '기타':'#94a3b8' };
+    schedEl.innerHTML = showItems.map(s => {
+      const title = s.properties['일정 제목']?.title?.[0]?.text?.content || '';
+      const dtRaw = s.properties['날짜/시간']?.date?.start || '';
+      const isToday = dtRaw.startsWith(todayStr);
+      const timeStr = dtRaw ? this._fmtSchedTime(dtRaw, false) : '';
+      const cat = s.properties['카테고리']?.select?.name || '';
+      return `<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #f1f5f9">
+        <div style="width:3px;height:32px;border-radius:2px;background:${catColors[cat]||'#6366f1'};flex-shrink:0"></div>
+        <div style="flex:1;min-width:0">
+          <div style="font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${title}</div>
+          <div style="font-size:11px;color:#94a3b8">${isToday ? '오늘' : dtRaw.slice(5,10).replace('-','/')} ${timeStr}</div>
+        </div>
+        ${isToday ? `<span style="font-size:10px;background:#fef3c7;color:#d97706;padding:2px 6px;border-radius:10px;flex-shrink:0">오늘</span>` : ''}
+      </div>`;
+    }).join('');
+  },
+
+  _fillHomeTodoSummary(todos) {
     const todoSumEl = document.getElementById('home-todo-summary');
-    if (todoSumEl && this.state.dbIds.todo) {
-      try {
-        const res = await fetch(`/api/todos?dbId=${this.state.dbIds.todo}`);
-        const data = await res.json();
-        const todos = data.results || [];
-        const total = todos.length;
-        const done = todos.filter(t => t.properties['상태']?.select?.name === '완료').length;
-        const overdue = todos.filter(t => {
-          const d = t.properties['Due Date']?.date?.start;
-          const s = t.properties['상태']?.select?.name;
-          return d && new Date(d) < new Date() && s !== '완료';
-        }).length;
-        const pct = total > 0 ? Math.round(done/total*100) : 0;
-        todoSumEl.innerHTML = `
-          <div style="display:flex;justify-content:space-between;font-size:12px;color:#64748b;margin-bottom:6px">
-            <span>완료 ${done}/${total}</span>
-            <span style="font-weight:700;color:#6366f1">${pct}%</span>
-          </div>
-          <div style="background:#e2e8f0;border-radius:4px;height:6px;overflow:hidden">
-            <div style="width:${pct}%;background:linear-gradient(90deg,#6366f1,#8b5cf6);height:100%;border-radius:4px;transition:width 0.4s"></div>
-          </div>
-          ${overdue > 0 ? `<div style="margin-top:6px;font-size:11px;color:#ef4444;font-weight:600">⚠️ 기한초과 ${overdue}개</div>` : `<div style="margin-top:6px;font-size:11px;color:#10b981">✅ 기한초과 없음</div>`}`;
-      } catch(_) {}
-    }
-    // 오늘 할 일 목록 (미완료 우선, 기한초과 강조)
+    if (!todoSumEl) return;
+    const total = todos.length;
+    const done = todos.filter(t => t.properties['상태']?.select?.name === '완료').length;
+    const overdue = todos.filter(t => {
+      const d = t.properties['Due Date']?.date?.start;
+      const s = t.properties['상태']?.select?.name;
+      return d && new Date(d) < new Date() && s !== '완료';
+    }).length;
+    const pct = total > 0 ? Math.round(done/total*100) : 0;
+    todoSumEl.innerHTML = `
+      <div style="display:flex;justify-content:space-between;font-size:12px;color:#64748b;margin-bottom:6px">
+        <span>완료 ${done}/${total}</span>
+        <span style="font-weight:700;color:#6366f1">${pct}%</span>
+      </div>
+      <div style="background:#e2e8f0;border-radius:4px;height:6px;overflow:hidden">
+        <div style="width:${pct}%;background:linear-gradient(90deg,#6366f1,#8b5cf6);height:100%;border-radius:4px;transition:width 0.4s"></div>
+      </div>
+      ${overdue > 0 ? `<div style="margin-top:6px;font-size:11px;color:#ef4444;font-weight:600">⚠️ 기한초과 ${overdue}개</div>` : `<div style="margin-top:6px;font-size:11px;color:#10b981">✅ 기한초과 없음</div>`}`;
+  },
+
+  _fillHomeTodayTodos(todos) {
     const todayTodoEl = document.getElementById('home-today-todos');
-    if (todayTodoEl && this.state.dbIds.todo) {
-      try {
-        const res = await fetch(`/api/todos?dbId=${this.state.dbIds.todo}`);
-        const data = await res.json();
-        const todos = data.results || [];
-        const now = new Date();
-        const todayStr = now.toISOString().split('T')[0];
-        // 미완료 중: 기한초과 → 오늘마감 → 나머지 순
-        const active = todos.filter(t => t.properties['상태']?.select?.name !== '완료');
-        const rank = t => {
-          const d = t.properties['Due Date']?.date?.start;
-          if (d && d < todayStr) return 0;          // 기한초과
-          if (d && d.startsWith(todayStr)) return 1; // 오늘마감
-          if (d) return 2;                            // 향후 마감
-          return 3;                                   // 마감없음
-        };
-        const sorted = active.sort((a, b) => rank(a) - rank(b)).slice(0, 5);
-        if (!sorted.length) {
-          todayTodoEl.innerHTML = `<div style="font-size:12px;color:#94a3b8;text-align:center;padding:8px 0">할 일이 모두 완료됐어요 🎉</div>`;
-        } else {
-          todayTodoEl.innerHTML = sorted.map(t => {
-            const title = t.properties['할 일']?.title?.[0]?.text?.content || '(제목 없음)';
-            const d = t.properties['Due Date']?.date?.start || '';
-            const overdue = d && d < todayStr;
-            const isToday = d && d.startsWith(todayStr);
-            const prio = t.properties['우선순위']?.select?.name || '';
-            const dueLabel = overdue ? `기한초과 ${d.slice(5,10).replace('-','/')}` : isToday ? '오늘 마감' : d ? d.slice(5,10).replace('-','/') : '';
-            const dueColor = overdue ? '#ef4444' : isToday ? '#d97706' : '#94a3b8';
-            return `<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #f1f5f9">
-              <span style="font-size:12px;flex-shrink:0">${prio.includes('높음') ? '🔴' : prio.includes('중간') ? '🟡' : prio.includes('낮음') ? '🟢' : '⚪'}</span>
-              <div style="flex:1;min-width:0;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${title}</div>
-              ${dueLabel ? `<span style="font-size:10px;color:${dueColor};font-weight:600;flex-shrink:0;white-space:nowrap">${dueLabel}</span>` : ''}
-            </div>`;
-          }).join('');
-        }
-      } catch(_) { todayTodoEl.innerHTML = ''; }
+    if (!todayTodoEl) return;
+    const todayStr = new Date().toISOString().split('T')[0];
+    const active = todos.filter(t => t.properties['상태']?.select?.name !== '완료');
+    const rank = t => {
+      const d = t.properties['Due Date']?.date?.start;
+      if (d && d < todayStr) return 0;          // 기한초과
+      if (d && d.startsWith(todayStr)) return 1; // 오늘마감
+      if (d) return 2;                            // 향후 마감
+      return 3;                                   // 마감없음
+    };
+    const sorted = active.sort((a, b) => rank(a) - rank(b)).slice(0, 5);
+    if (!sorted.length) {
+      todayTodoEl.innerHTML = `<div style="font-size:12px;color:#94a3b8;text-align:center;padding:8px 0">할 일이 모두 완료됐어요 🎉</div>`;
+      return;
     }
-    // 이번 주 일정 (오늘~+7일)
+    todayTodoEl.innerHTML = sorted.map(t => {
+      const title = t.properties['할 일']?.title?.[0]?.text?.content || '(제목 없음)';
+      const d = t.properties['Due Date']?.date?.start || '';
+      const overdue = d && d < todayStr;
+      const isToday = d && d.startsWith(todayStr);
+      const prio = t.properties['우선순위']?.select?.name || '';
+      const dueLabel = overdue ? `기한초과 ${d.slice(5,10).replace('-','/')}` : isToday ? '오늘 마감' : d ? d.slice(5,10).replace('-','/') : '';
+      const dueColor = overdue ? '#ef4444' : isToday ? '#d97706' : '#94a3b8';
+      return `<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #f1f5f9">
+        <span style="font-size:12px;flex-shrink:0">${prio.includes('높음') ? '🔴' : prio.includes('중간') ? '🟡' : prio.includes('낮음') ? '🟢' : '⚪'}</span>
+        <div style="flex:1;min-width:0;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${title}</div>
+        ${dueLabel ? `<span style="font-size:10px;color:${dueColor};font-weight:600;flex-shrink:0;white-space:nowrap">${dueLabel}</span>` : ''}
+      </div>`;
+    }).join('');
+  },
+
+  _fillHomeWeekSchedule(results) {
     const weekEl = document.getElementById('home-week-schedule');
-    if (weekEl && this.state.dbIds.schedule) {
-      try {
-        const res = await fetch(`/api/schedules?dbId=${this.state.dbIds.schedule}`);
-        const data = await res.json();
-        const results = data.results || [];
-        const now = new Date();
-        const weekLater = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
-        const items = results
-          .map(s => ({ s, dt: s.properties['날짜/시간']?.date?.start || '' }))
-          .filter(x => x.dt && new Date(x.dt) >= new Date(now.toISOString().split('T')[0]) && new Date(x.dt) <= weekLater)
-          .sort((a, b) => a.dt.localeCompare(b.dt))
-          .slice(0, 5);
-        if (!items.length) {
-          weekEl.innerHTML = `<div style="font-size:12px;color:#94a3b8;text-align:center;padding:8px 0">이번 주 일정이 없어요 😊</div>`;
-        } else {
-          const todayStr = now.toISOString().split('T')[0];
-          const catColors = { '회의':'#6366f1', '개인':'#10b981', '이벤트':'#f59e0b', '약속':'#ef4444', '기타':'#94a3b8' };
-          const wk = ['일','월','화','수','목','금','토'];
-          weekEl.innerHTML = items.map(({ s, dt }) => {
-            const title = s.properties['일정 제목']?.title?.[0]?.text?.content || '';
-            const dObj = new Date(dt);
-            const isToday = dt.startsWith(todayStr);
-            const cat = s.properties['카테고리']?.select?.name || '';
-            const timeStr = dObj.toLocaleTimeString('ko-KR', { hour:'2-digit', minute:'2-digit', hour12:false });
-            const dayLabel = isToday ? '오늘' : `${dObj.getMonth()+1}/${dObj.getDate()}(${wk[dObj.getDay()]})`;
-            return `<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #f1f5f9">
-              <div style="width:3px;height:32px;border-radius:2px;background:${catColors[cat]||'#6366f1'};flex-shrink:0"></div>
-              <div style="flex:1;min-width:0">
-                <div style="font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${title}</div>
-                <div style="font-size:11px;color:#94a3b8">${dayLabel} ${timeStr}</div>
-              </div>
-              ${isToday ? `<span style="font-size:10px;background:#fef3c7;color:#d97706;padding:2px 6px;border-radius:10px;flex-shrink:0">오늘</span>` : ''}
-            </div>`;
-          }).join('');
-        }
-      } catch(_) { weekEl.innerHTML = ''; }
+    if (!weekEl) return;
+    const now = new Date();
+    const weekLater = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+    const items = results
+      .map(s => ({ s, dt: s.properties['날짜/시간']?.date?.start || '' }))
+      .filter(x => x.dt && new Date(x.dt) >= new Date(now.toISOString().split('T')[0]) && new Date(x.dt) <= weekLater)
+      .sort((a, b) => a.dt.localeCompare(b.dt))
+      .slice(0, 5);
+    if (!items.length) {
+      weekEl.innerHTML = `<div style="font-size:12px;color:#94a3b8;text-align:center;padding:8px 0">이번 주 일정이 없어요 😊</div>`;
+      return;
     }
+    const todayStr = now.toISOString().split('T')[0];
+    const catColors = { '회의':'#6366f1', '개인':'#10b981', '이벤트':'#f59e0b', '약속':'#ef4444', '기타':'#94a3b8' };
+    const wk = ['일','월','화','수','목','금','토'];
+    weekEl.innerHTML = items.map(({ s, dt }) => {
+      const title = s.properties['일정 제목']?.title?.[0]?.text?.content || '';
+      const dObj = new Date(dt);
+      const isToday = dt.startsWith(todayStr);
+      const cat = s.properties['카테고리']?.select?.name || '';
+      const timeStr = this._fmtSchedTime(dt, false);
+      const dayLabel = isToday ? '오늘' : `${dObj.getMonth()+1}/${dObj.getDate()}(${wk[dObj.getDay()]})`;
+      return `<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #f1f5f9">
+        <div style="width:3px;height:32px;border-radius:2px;background:${catColors[cat]||'#6366f1'};flex-shrink:0"></div>
+        <div style="flex:1;min-width:0">
+          <div style="font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${title}</div>
+          <div style="font-size:11px;color:#94a3b8">${dayLabel} ${timeStr}</div>
+        </div>
+        ${isToday ? `<span style="font-size:10px;background:#fef3c7;color:#d97706;padding:2px 6px;border-radius:10px;flex-shrink:0">오늘</span>` : ''}
+      </div>`;
+    }).join('');
   },
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -1948,6 +1934,9 @@ const MemoNest = {
                 <button data-mid="${m.id}" onclick="MemoNest.showEditMeetingModal(this.dataset.mid)"
                   style="background:none;border:1px solid #e2e8f0;border-radius:6px;padding:4px 8px;cursor:pointer;font-size:11px;color:#64748b;display:flex;align-items:center;gap:3px"
                   title="수정"><i class="fas fa-pen"></i></button>
+                <button data-mid="${m.id}" onclick="MemoNest.reformatMeeting(this.dataset.mid)"
+                  style="background:none;border:1px solid #e0e7ff;border-radius:6px;padding:4px 8px;cursor:pointer;font-size:11px;color:#6366f1;display:flex;align-items:center;gap:3px"
+                  title="AI로 다시 정리 (기존 내용 유지)"><i class="fas fa-wand-magic-sparkles"></i></button>
                 <a href="${notionUrl}" target="_blank"
                   style="background:none;border:1px solid #e2e8f0;border-radius:6px;padding:4px 8px;cursor:pointer;font-size:11px;color:#6366f1;text-decoration:none;display:flex;align-items:center;gap:3px"
                   title="노션에서 보기"><i class="fas fa-external-link-alt"></i></a>
@@ -1957,6 +1946,21 @@ const MemoNest = {
         }).join('')}`;
     } catch (e) {
       el.innerHTML = '<p style="color:#ef4444;text-align:center;padding:20px">로드 실패: ' + e.message + '</p>';
+    }
+  },
+
+  // 회의록 AI 재정리 (기존 원본으로 요약 재생성, 비파괴적)
+  async reformatMeeting(mid) {
+    if (!mid) return;
+    this.toast('AI가 회의록을 다시 정리하고 있어요...', 'info', 3000);
+    try {
+      const res = await fetch(`/api/meetings/${mid}/reformat`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      const data = await res.json();
+      if (data.error) { this.toast('재정리 실패: ' + data.error, 'error', 4000); return; }
+      this.toast('✨ 회의록을 다시 정리했어요! (노션 본문에 추가됨)', 'success', 4000);
+      this.loadMeetings();
+    } catch (e) {
+      this.toast('재정리 실패: ' + (e.message || '네트워크 오류'), 'error', 4000);
     }
   },
 
@@ -3138,12 +3142,16 @@ const MemoNest = {
 
     const mode = this._schedView.mode || 'month';
     const anchor = this._schedView.anchor ? new Date(this._schedView.anchor) : new Date();
-    const today = new Date();
+    // '오늘'도 선택 타임존 기준으로 (eventDates 버킷과 일관)
+    // _instantInTz 는 UTC 필드가 선택 tz 벽시계값이므로, 그 값으로 로컬 Date를 재구성
+    const _tzNow = this._instantInTz(new Date().toISOString());
+    const today = new Date(_tzNow.getUTCFullYear(), _tzNow.getUTCMonth(), _tzNow.getUTCDate());
 
-    // 이벤트 날짜 Set (빠른 조회용)
+    // 이벤트 날짜 Set (빠른 조회용) — 선택된 타임존 기준 날짜로 버킷팅
+    // (저장 ISO의 slice(0,10)은 일정 저장 시 타임존 기준이라, 보기 타임존과 다르면 하루 어긋남)
     const eventDates = new Set();
     Object.values(this._scheduleCache || {}).forEach(s => {
-      if (s.datetime) eventDates.add(s.datetime.slice(0,10));
+      if (s.datetime) eventDates.add(this._tzDateKey(s.datetime));
     });
 
     // 탭 버튼
@@ -3263,7 +3271,7 @@ const MemoNest = {
     const dateStr = `${anchor.getFullYear()}-${String(anchor.getMonth()+1).padStart(2,'0')}-${String(anchor.getDate()).padStart(2,'0')}`;
     const isToday = anchor.toDateString() === today.toDateString();
     const daySchedules = Object.entries(this._scheduleCache || {}).filter(([,s]) =>
-      s.datetime && s.datetime.startsWith(dateStr)
+      s.datetime && this._tzDateKey(s.datetime) === dateStr
     ).sort(([,a],[,b]) => a.datetime.localeCompare(b.datetime));
 
     return `
@@ -3274,7 +3282,7 @@ const MemoNest = {
       <div style="max-height:200px;overflow-y:auto">
         ${daySchedules.length ? daySchedules.map(([sid,s]) => {
           const cs = this._getCatStyle(s.category);
-          const timeStr = s.datetime ? new Date(s.datetime).toLocaleTimeString('ko-KR',{hour:'2-digit',minute:'2-digit',hour12:false}) : '';
+          const timeStr = s.datetime ? this._fmtSchedTime(s.datetime, false) : '';
           return `<div style="display:flex;gap:8px;padding:6px 8px;margin-bottom:4px;border-radius:8px;background:${cs.bg};border-left:3px solid ${cs.dot};cursor:pointer"
             onclick="MemoNest.showEditScheduleById('${sid}')">
             <span style="font-size:11px;color:${cs.tag};font-weight:600;white-space:nowrap">${timeStr}</span>
@@ -3348,23 +3356,25 @@ const MemoNest = {
     let rangeLabel = '';
     if (mode === 'day' || selectedDate) {
       const dateStr = selectedDate || anchor.toISOString().slice(0,10);
-      filtered = allItems.filter(([,s]) => s.datetime && s.datetime.startsWith(dateStr));
+      // 선택 타임존 기준 날짜 버킷으로 비교 (캘린더와 일관)
+      filtered = allItems.filter(([,s]) => s.datetime && this._tzDateKey(s.datetime) === dateStr);
       rangeLabel = new Date(dateStr + 'T12:00:00').toLocaleDateString('ko-KR', {month:'long',day:'numeric',weekday:'short'});
     } else if (mode === 'week') {
       const ws = new Date(anchor); ws.setDate(anchor.getDate() - anchor.getDay());
       const we = new Date(ws); we.setDate(ws.getDate() + 7);
+      const wsKey = `${ws.getFullYear()}-${String(ws.getMonth()+1).padStart(2,'0')}-${String(ws.getDate()).padStart(2,'0')}`;
+      const weKey = `${we.getFullYear()}-${String(we.getMonth()+1).padStart(2,'0')}-${String(we.getDate()).padStart(2,'0')}`;
       filtered = allItems.filter(([,s]) => {
         if (!s.datetime) return false;
-        const d = new Date(s.datetime); return d >= ws && d < we;
+        const k = this._tzDateKey(s.datetime); return k >= wsKey && k < weKey;
       });
       rangeLabel = `${ws.toLocaleDateString('ko-KR',{month:'short',day:'numeric'})} ~ ${we.toLocaleDateString('ko-KR',{month:'short',day:'numeric'})} 주간`;
     } else {
-      // month — 해당 월 전체
-      const year = anchor.getFullYear(), month = anchor.getMonth();
+      // month — 해당 월 전체 (선택 타임존 기준)
+      const ym = `${anchor.getFullYear()}-${String(anchor.getMonth()+1).padStart(2,'0')}`;
       filtered = allItems.filter(([,s]) => {
         if (!s.datetime) return false;
-        const d = new Date(s.datetime);
-        return d.getFullYear()===year && d.getMonth()===month;
+        return this._tzDateKey(s.datetime).startsWith(ym);
       });
       rangeLabel = anchor.toLocaleDateString('ko-KR',{year:'numeric',month:'long'});
     }
@@ -3980,6 +3990,14 @@ const MemoNest = {
     const off = (offsetMin === undefined || offsetMin === null) ? this._activeTzOffset() : offsetMin;
     const utcMs = new Date(iso).getTime();
     return new Date(utcMs + off * 60000); // 이 Date의 getUTC* 가 선택 tz 벽시계값
+  },
+
+  // 절대시각 ISO → 선택 타임존 기준 'YYYY-MM-DD' (캘린더 날짜 버킷 키)
+  _tzDateKey(iso) {
+    const d = this._instantInTz(iso);
+    if (!d) return '';
+    const pad = n => String(n).padStart(2, '0');
+    return `${d.getUTCFullYear()}-${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())}`;
   },
 
   // 선택 타임존 기준 날짜/시간 라벨
